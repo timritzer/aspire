@@ -11,8 +11,9 @@ import { AspireEditorCommandProvider } from '../editor/AspireEditorCommandProvid
 import { AspireTerminalProvider } from '../utils/AspireTerminalProvider';
 import * as cliPathModule from '../utils/cliPath';
 import { ConfigInfoProvider } from '../utils/configInfoProvider';
-import { windowCliPathTarget, workspaceFolderCliPathTarget } from '../utils/cliPathVariables';
+import { CliPathResolutionTarget, windowCliPathTarget, workspaceFolderCliPathTarget } from '../utils/cliPathVariables';
 import { CommandInvocationEvent, onDidInvokeCommand } from '../utils/telemetry';
+import { onDidResolveCliForOperation } from '../utils/workspace';
 import { createWorkspaceFolder, removeDirectorySafely } from './testHelpers';
 suite('registerCliCommands', () => {
     let sandbox: sinon.SinonSandbox;
@@ -27,6 +28,8 @@ suite('registerCliCommands', () => {
     let getWorkspaceFolderStub: sinon.SinonStub;
     let getAppHostPathStub: sinon.SinonStub;
     let tryExecuteDoAppHostStub: sinon.SinonStub;
+    let tryExecuteDeployAppHostStub: sinon.SinonStub;
+    let tryExecutePublishAppHostStub: sinon.SinonStub;
     let editorCommandProvider: AspireEditorCommandProvider;
     let tempDir: string;
 
@@ -58,9 +61,13 @@ suite('registerCliCommands', () => {
         getWorkspaceFolderStub = sandbox.stub(vscode.workspace, 'getWorkspaceFolder').returns(undefined);
         getAppHostPathStub = sinon.stub().resolves(null);
         tryExecuteDoAppHostStub = sinon.stub().resolves();
+        tryExecuteDeployAppHostStub = sinon.stub().resolves();
+        tryExecutePublishAppHostStub = sinon.stub().resolves();
         editorCommandProvider = {
             getAppHostPath: getAppHostPathStub,
             tryExecuteDoAppHost: tryExecuteDoAppHostStub,
+            tryExecuteDeployAppHost: tryExecuteDeployAppHostStub,
+            tryExecutePublishAppHost: tryExecutePublishAppHostStub,
         } as unknown as AspireEditorCommandProvider;
 
         registerCliCommands(terminalProvider, editorCommandProvider, new ConfigInfoProvider(terminalProvider));
@@ -259,6 +266,50 @@ suite('registerCliCommands', () => {
             forceRefresh: true,
         }));
         assert.ok(tryExecuteDoAppHostStub.calledOnceWith(false, undefined, appHostPath, target, '/resolved/aspire'));
+    });
+
+    test('deploy and publish warn for the same multi-root CLI they launch', async () => {
+        const folderA = createWorkspaceFolder('a', '/repo/a');
+        const folderB = createWorkspaceFolder('b', '/repo/b');
+        const appHostPath = '/repo/b/AppHost/AppHost.csproj';
+        const target = workspaceFolderCliPathTarget(folderB);
+        workspaceFoldersStub.value([folderA, folderB]);
+        getAppHostPathStub.resolves(appHostPath);
+        getWorkspaceFolderStub.returns(folderB);
+        resolveCliPathStub.callsFake(async resolvedTarget => ({
+            cliPath: resolvedTarget.kind === 'workspaceFolder' &&
+                resolvedTarget.workspaceFolder.uri.toString() === folderB.uri.toString()
+                ? '/repo/b/.aspire/bin/aspire'
+                : '/global/aspire',
+            available: true,
+            source: 'configured',
+        }));
+        const resolutions: Array<{ target: CliPathResolutionTarget; cliPath: string }> = [];
+        const resolutionSubscription = onDidResolveCliForOperation(resolution => resolutions.push(resolution));
+
+        try {
+            await callbacks.get('aspire-vscode.deploy')!();
+            await callbacks.get('aspire-vscode.publish')!();
+        }
+        finally {
+            resolutionSubscription.dispose();
+        }
+
+        assert.deepStrictEqual(resolutions, [
+            { target, cliPath: '/repo/b/.aspire/bin/aspire' },
+            { target, cliPath: '/repo/b/.aspire/bin/aspire' },
+        ]);
+        assert.ok(tryExecuteDeployAppHostStub.calledOnceWith(
+            false,
+            appHostPath,
+            target,
+            '/repo/b/.aspire/bin/aspire'));
+        assert.ok(tryExecutePublishAppHostStub.calledOnceWith(
+            false,
+            appHostPath,
+            target,
+            '/repo/b/.aspire/bin/aspire'));
+        assert.strictEqual(resolveCliPathStub.neverCalledWith(windowCliPathTarget), true);
     });
 
     test('do rejects a missing AppHost before probing the CLI', async () => {
