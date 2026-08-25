@@ -54,9 +54,15 @@ const api = await builder.addDotnetProject("api", "../api/api.csproj")
 await builder.build().run();
 ```
 
-The resource is launched with `dotnet run --project <path>` (or `dotnet run --file <path>` for a
-file-based app). Endpoints, environment variables, and service discovery are configured from the
-project's `launchSettings.json` and Kestrel configuration, matching `AddProject<T>`.
+Before resources start, Aspire collects the traditional projects into a generated AppHost-local
+solution and builds them together once. Each project is then launched with
+`dotnet run --project <path> --no-build`. File-based apps aren't included in the generated solution;
+they compile separately with `dotnet run --file <path> --no-cache`. In an application that has both
+resource kinds, file-based apps wait for the coordinated project build before compiling so shared
+project references don't race.
+
+Endpoints, environment variables, and service discovery are configured from the project's
+`launchSettings.json` and Kestrel configuration, matching `AddProject<T>`.
 
 ## Publishing
 

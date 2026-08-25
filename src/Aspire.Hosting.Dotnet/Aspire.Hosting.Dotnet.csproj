@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Aspire.Hosting\Aspire.Hosting.csproj" />
+    <PackageReference Include="Microsoft.VisualStudio.SolutionPersistence" />
   </ItemGroup>
 
   <!-- Source-shared helpers. Linking them (rather than reaching into Aspire.Hosting internals through

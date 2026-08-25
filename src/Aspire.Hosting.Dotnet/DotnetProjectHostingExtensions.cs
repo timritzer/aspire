@@ -127,10 +127,12 @@ public static class DotnetProjectHostingExtensions
                               .WithIconName("CodeCsRectangle")
                               .WithProjectDefaults(options);
 
+        DotnetProjectBuildCoordinator.Configure(resource, projectMetadata, configuration);
+
         // Declare the default `dotnet run` invocation separately from the program arguments so a later
         // WithLaunchToolArgs call replaces it instead of being prepended to it:
-        //   dotnet run --project <proj> [--no-build] [--configuration <cfg>] --no-launch-profile OR
-        //   dotnet run --file <app.cs> --no-cache [--no-build] [--configuration <cfg>] --no-launch-profile
+        //   dotnet run --project <proj> --no-build [--configuration <cfg>] --no-launch-profile OR
+        //   dotnet run --file <app.cs> --no-cache [--configuration <cfg>] --no-launch-profile
         resource.WithLaunchToolArgs(ctx =>
         {
             if (ctx.Resource.SupportsDebugging(builder.Configuration, out var debugAnnotation)

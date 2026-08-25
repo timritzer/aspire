@@ -6,6 +6,7 @@
 #pragma warning disable ASPIREPERSISTENCE001
 #pragma warning disable ASPIREPIPELINES001
 
+using System.Reflection;
 using System.Text.Json;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Dcp.Model;
@@ -45,12 +46,10 @@ public class DotnetProjectResourceTests(ITestOutputHelper outputHelper)
 
         var args = await ArgumentEvaluator.GetArgumentListAsync(app.Resource);
 
-        // run --project <path> [--configuration <cfg>] --no-launch-profile
-        // (--configuration is only present when the app host assembly declares a build configuration)
-        Assert.Equal("run", args[0]);
-        Assert.Equal("--project", args[1]);
-        Assert.Equal(projectPath, args[2]);
-        Assert.Equal("--no-launch-profile", args[^1]);
+        var expected = new List<string> { "run", "--project", projectPath, "--no-build" };
+        AddExpectedConfiguration(builder, expected);
+        expected.Add("--no-launch-profile");
+        Assert.Equal(expected, args);
     }
 
     [Fact]
@@ -63,12 +62,10 @@ public class DotnetProjectResourceTests(ITestOutputHelper outputHelper)
 
         var args = await ArgumentEvaluator.GetArgumentListAsync(app.Resource);
 
-        // run --file <path> --no-cache [--configuration <cfg>] --no-launch-profile
-        Assert.Equal("run", args[0]);
-        Assert.Equal("--file", args[1]);
-        Assert.Equal(appPath, args[2]);
-        Assert.Equal("--no-cache", args[3]);
-        Assert.Equal("--no-launch-profile", args[^1]);
+        var expected = new List<string> { "run", "--file", appPath, "--no-cache" };
+        AddExpectedConfiguration(builder, expected);
+        expected.Add("--no-launch-profile");
+        Assert.Equal(expected, args);
     }
 
     [Fact]
@@ -899,6 +896,15 @@ public class DotnetProjectResourceTests(ITestOutputHelper outputHelper)
         context.Args.Add("package");
         context.Args.Add("--yes");
         context.Args.Add("--");
+    }
+
+    private static void AddExpectedConfiguration(IDistributedApplicationBuilder builder, List<string> expected)
+    {
+        if (builder.AppHostAssembly?.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration is { Length: > 0 } configuration)
+        {
+            expected.Add("--configuration");
+            expected.Add(configuration);
+        }
     }
 
     private static void AssertUnsupportedPublishMessage(

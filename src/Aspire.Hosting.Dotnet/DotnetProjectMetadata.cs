@@ -17,4 +17,6 @@ internal sealed class DotnetProjectMetadata(string projectPath) : IProjectMetada
     // Resolution is deferred so construction never touches the file system; an unresolvable path is
     // reported as a resource start failure instead.
     public string ProjectPath => _resolvedProjectPath ??= ProjectPathResolver.ResolveProjectPath(projectPath);
+
+    public bool SuppressBuild { get; set; }
 }
