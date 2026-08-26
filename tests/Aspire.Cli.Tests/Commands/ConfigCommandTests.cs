@@ -46,6 +46,7 @@ public class ConfigCommandTests(ITestOutputHelper outputHelper)
     [Fact]
     public void ConfigInfo_AdvertisesAspireTestAppHost()
     {
+        Assert.Equal("aspire-test-apphost.v1", KnownCapabilities.AspireTestAppHost);
         Assert.Contains(KnownCapabilities.AspireTestAppHost, KnownCapabilities.GetAdvertisedCapabilities());
     }
 
