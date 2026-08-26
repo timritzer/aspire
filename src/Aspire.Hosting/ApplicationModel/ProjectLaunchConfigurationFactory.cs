@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #pragma warning disable ASPIREEXTENSION001
+#pragma warning disable ASPIREPROJECTS001
 
 namespace Aspire.Hosting.ApplicationModel;
 
@@ -24,10 +25,13 @@ internal static class ProjectLaunchConfigurationFactory
 
     public static ProjectLaunchConfiguration Create(IResource resource, IProjectMetadata projectMetadata, string mode)
     {
+        resource.TryGetLastAnnotation<ProjectLaunchDefaultsAnnotation>(out var launchDefaults);
         var projectLaunchConfiguration = new ProjectLaunchConfiguration
         {
             ProjectPath = projectMetadata.ProjectPath,
             Mode = mode,
+            BuildConfiguration = launchDefaults?.BuildConfiguration,
+            SuppressBuild = projectMetadata.SuppressBuild,
             // The launch profile selection lives on the resource rather than on the project metadata, so it
             // can only be resolved when the configuration is produced, not when debug support is registered.
             DisableLaunchProfile = resource.TryGetLastAnnotation<ExcludeLaunchProfileAnnotation>(out _)

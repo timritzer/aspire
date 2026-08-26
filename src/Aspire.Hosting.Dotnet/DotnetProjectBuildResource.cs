@@ -3,6 +3,7 @@
 
 using System.IO.Hashing;
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Utils;
 using Microsoft.VisualStudio.SolutionPersistence.Model;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 
@@ -47,7 +48,7 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource
     /// </summary>
     public void AddProject(string projectPath)
     {
-        var fullPath = Path.GetFullPath(projectPath);
+        var fullPath = PathNormalizer.ResolveToFilesystemPath(Path.GetFullPath(projectPath));
 
         lock (_lock)
         {
@@ -56,17 +57,9 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource
                 throw new InvalidOperationException("Projects cannot be added after the coordinated build solution has been generated.");
             }
 
-            var existingPath = _projectPaths.FirstOrDefault(
-                path => string.Equals(path, fullPath, StringComparison.OrdinalIgnoreCase));
-            if (existingPath is null)
+            if (!_projectPaths.Contains(fullPath, StringComparer.Ordinal))
             {
                 _projectPaths.Add(fullPath);
-            }
-            else if (!string.Equals(existingPath, fullPath, StringComparison.Ordinal) &&
-                     !OperatingSystem.IsWindows())
-            {
-                throw new DistributedApplicationException(
-                    $"Projects '{existingPath}' and '{fullPath}' differ only by letter casing and cannot both be included in the coordinated solution.");
             }
         }
     }

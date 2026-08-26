@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import childProcess = require('child_process');
 import { EventEmitter } from 'events';
 import * as nodePath from 'path';
+import { PassThrough } from 'stream';
 import * as sinon from 'sinon';
 import * as vscode from 'vscode';
 import { createProjectDebuggerExtension, DotNetService, projectDebuggerExtension, quoteCommandLineArgument } from '../debugger/languages/dotnet';
@@ -16,7 +17,7 @@ import { workspaceFolderCliPathTarget } from '../utils/cliPathVariables';
 
 import { removeDirectorySafely } from './testHelpers';
 class TestDotNetService {
-    private _getDotNetTargetPathStub: sinon.SinonStub;
+    public getDotNetTargetPathStub: sinon.SinonStub;
     private _hasDevKit: boolean;
 
     public buildDotNetProjectStub: sinon.SinonStub;
@@ -25,10 +26,11 @@ class TestDotNetService {
     // RunCommand payload; the default empty string mirrors the not-configured case.
     public runApiOutput: string = '';
     public runApiEnvironment: NodeJS.ProcessEnv | undefined;
+    public runApiBuildConfiguration: string | undefined;
 
     constructor(outputPath: string, rejectBuild: Error | null, hasDevKit: boolean) {
-        this._getDotNetTargetPathStub = sinon.stub();
-        this._getDotNetTargetPathStub.resolves(outputPath);
+        this.getDotNetTargetPathStub = sinon.stub();
+        this.getDotNetTargetPathStub.resolves(outputPath);
 
         this.buildDotNetProjectStub = sinon.stub();
         if (rejectBuild) {
@@ -40,20 +42,21 @@ class TestDotNetService {
         this._hasDevKit = hasDevKit;
     }
 
-    getDotNetTargetPath(projectFile: string): Promise<string> {
-        return this._getDotNetTargetPathStub(projectFile);
+    getDotNetTargetPath(projectFile: string, buildConfiguration?: string): Promise<string> {
+        return this.getDotNetTargetPathStub(projectFile, buildConfiguration);
     }
 
-    buildDotNetProject(projectFile: string): Promise<void> {
-        return this.buildDotNetProjectStub(projectFile);
+    buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void> {
+        return this.buildDotNetProjectStub(projectFile, buildConfiguration);
     }
 
     getAndActivateDevKit(): Promise<boolean> {
         return Promise.resolve(this._hasDevKit);
     }
 
-    getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv): Promise<string> {
+    getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv, buildConfiguration?: string): Promise<string> {
         this.runApiEnvironment = environment;
+        this.runApiBuildConfiguration = buildConfiguration;
         return Promise.resolve(this.runApiOutput);
     }
 }
@@ -417,7 +420,8 @@ suite('Dotnet Debugger Extension Tests', () => {
 
         const launchConfig: ProjectLaunchConfiguration = {
             type: 'project',
-            project_path: projectPath
+            project_path: projectPath,
+            build_configuration: 'Release'
         };
 
         const debugConfig: AspireResourceExtendedDebugConfiguration = {
@@ -439,6 +443,12 @@ suite('Dotnet Debugger Extension Tests', () => {
 
         assert.strictEqual(msbuildCallFor(execFileStub, projectPath).args[2]?.cwd, projectDirectory);
         assert.strictEqual(buildCallFor(spawnStub, projectPath).args[2]?.cwd, projectDirectory);
+        assert.deepStrictEqual(
+            msbuildCallFor(execFileStub, projectPath).args[1].slice(-1),
+            ['-property:Configuration=Release']);
+        assert.deepStrictEqual(
+            buildCallFor(spawnStub, projectPath).args[1].slice(-2),
+            ['--configuration', 'Release']);
     });
 
     test('project-scoped dotnet commands resolve the CLI using the target derived from the project path and forward only that resolved CLI', async () => {
@@ -508,6 +518,34 @@ suite('Dotnet Debugger Extension Tests', () => {
         assert.strictEqual(clock.countTimers(), 0);
     });
 
+    test('dotnet run-api supplies build configuration through the MSBuild environment', async () => {
+        sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+        const stdout = new PassThrough();
+        const child = Object.assign(new EventEmitter(), {
+            stdin: new PassThrough(),
+            stdout,
+            stderr: new PassThrough(),
+            kill: sinon.stub()
+        });
+        const spawnStub = sinon.stub(childProcess, 'spawn').returns(
+            child as unknown as childProcess.ChildProcessWithoutNullStreams);
+        const service = new DotNetService({} as AspireDebugSession);
+
+        const response = service.getDotNetRunApiOutput(
+            '/workspace/app.cs',
+            { ASPIRE_SUPPRESS_CLI_RUN_HOOK: 'true' },
+            'Release');
+        await new Promise<void>(resolve => setImmediate(resolve));
+        stdout.write('{"$type":"RunCommand"}\n');
+        await response;
+
+        assert.deepStrictEqual(spawnStub.firstCall.args[1], ['run-api']);
+        assert.strictEqual(spawnStub.firstCall.args[2]?.env?.Configuration, 'Release');
+        assert.strictEqual(
+            spawnStub.firstCall.args[2]?.env?.ASPIRE_SUPPRESS_CLI_RUN_HOOK,
+            'true');
+    });
+
     test('dotnet run-api does not time out or spawn while CLI resolution is pending', async () => {
         const clock = sinon.useFakeTimers({ shouldClearNativeTimers: true });
         let rejectResolution!: (reason?: unknown) => void;
@@ -559,6 +597,68 @@ suite('Dotnet Debugger Extension Tests', () => {
 
         assert.strictEqual(debugConfig.program, outputPath);
         assert.strictEqual(dotNetService.buildDotNetProjectStub.notCalled, true);
+    });
+
+    test('coordinated project launch uses the configured output without rebuilding', async () => {
+        const outputPath = 'C:\\temp\\bin\\Release\\net10.0\\TestProject.dll';
+        const { extension, dotNetService } = createDebuggerExtension(outputPath, null, true, true);
+        const projectPath = 'C:\\temp\\TestProject.csproj';
+        const launchConfig: ProjectLaunchConfiguration = {
+            type: 'project',
+            project_path: projectPath,
+            build_configuration: 'Release',
+            suppress_build: true
+        };
+        const debugConfig: AspireResourceExtendedDebugConfiguration = {
+            runId: '1',
+            debugSessionId: '1',
+            type: 'coreclr',
+            name: 'Test Debug Config',
+            request: 'launch'
+        };
+        const fakeAspireDebugSession = sinon.createStubInstance(AspireDebugSession);
+
+        await extension.createDebugSessionConfigurationCallback!(
+            launchConfig,
+            [],
+            [],
+            { debug: true, forceBuild: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession },
+            debugConfig);
+
+        assert.ok(dotNetService.getDotNetTargetPathStub.calledOnceWith(projectPath, 'Release'));
+        assert.ok(dotNetService.buildDotNetProjectStub.notCalled);
+        assert.strictEqual(debugConfig.program, outputPath);
+    });
+
+    test('coordinated project launch fails instead of rebuilding when output is missing', async () => {
+        const outputPath = 'C:\\temp\\bin\\Release\\net10.0\\TestProject.dll';
+        const { extension, dotNetService } = createDebuggerExtension(outputPath, null, true, false);
+        const projectPath = 'C:\\temp\\TestProject.csproj';
+        const launchConfig: ProjectLaunchConfiguration = {
+            type: 'project',
+            project_path: projectPath,
+            build_configuration: 'Release',
+            suppress_build: true
+        };
+        const debugConfig: AspireResourceExtendedDebugConfiguration = {
+            runId: '1',
+            debugSessionId: '1',
+            type: 'coreclr',
+            name: 'Test Debug Config',
+            request: 'launch'
+        };
+        const fakeAspireDebugSession = sinon.createStubInstance(AspireDebugSession);
+
+        await assert.rejects(
+            extension.createDebugSessionConfigurationCallback!(
+                launchConfig,
+                [],
+                [],
+                { debug: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession },
+                debugConfig),
+            /coordinated build output .* does not exist/i);
+
+        assert.ok(dotNetService.buildDotNetProjectStub.notCalled);
     });
 
     test('project debug configuration is byte-identical whether or not C# Dev Kit is installed', async () => {
@@ -1217,7 +1317,8 @@ suite('Dotnet Debugger Extension Tests', () => {
 
         const launchConfig: ProjectLaunchConfiguration = {
             type: 'project',
-            project_path: '/tmp/apphost.cs'
+            project_path: '/tmp/apphost.cs',
+            build_configuration: 'Release'
         };
 
         const fakeAspireDebugSession = sinon.createStubInstance(AspireDebugSession);
@@ -1238,6 +1339,7 @@ suite('Dotnet Debugger Extension Tests', () => {
             createDebugConfig());
 
         assert.strictEqual(dotNetService.buildDotNetProjectStub.notCalled, true);
+        assert.strictEqual(dotNetService.runApiBuildConfiguration, 'Release');
 
         await extension.createDebugSessionConfigurationCallback!(
             launchConfig,
@@ -2324,13 +2426,13 @@ suite('Dotnet Debugger Extension Tests', () => {
         assert.strictEqual(debugConfig.noDebug, true);
     });
 
-    test('uses dotnet CLI when project runtimeconfig has no runnable framework', async () => {
+    test('coordinated project uses configured dotnet CLI fallback without rebuilding', async () => {
         const fs = require('fs');
         const path = require('path');
 
         const tempRoot = path.join(process.cwd(), '.test-temp', `dotnet-debugger-${process.pid}-${Date.now()}`);
         const projectDir = path.join(tempRoot, 'Frontend With Spaces');
-        const outputDir = path.join(projectDir, 'bin', 'Debug', 'net10.0');
+        const outputDir = path.join(projectDir, 'bin', 'Release', 'net10.0');
         fs.mkdirSync(outputDir, { recursive: true });
 
         try {
@@ -2347,7 +2449,9 @@ suite('Dotnet Debugger Extension Tests', () => {
             const { extension } = createDebuggerExtension(outputPath, null, true, true);
             const launchConfig: ProjectLaunchConfiguration = {
                 type: 'project',
-                project_path: projectPath
+                project_path: projectPath,
+                build_configuration: 'Release',
+                suppress_build: true
             };
 
             const debugConfig: AspireResourceExtendedDebugConfiguration = {
@@ -2364,7 +2468,7 @@ suite('Dotnet Debugger Extension Tests', () => {
 
             assert.strictEqual(debugConfig.type, 'coreclr');
             assert.strictEqual(debugConfig.program, 'dotnet');
-            assert.deepStrictEqual(debugConfig.args, ['run', '--project', projectPath, '--no-launch-profile', '--', '--message', 'hello world']);
+            assert.deepStrictEqual(debugConfig.args, ['run', '--project', projectPath, '--no-build', '--configuration', 'Release', '--no-launch-profile', '--', '--message', 'hello world']);
             assert.strictEqual(debugConfig.noDebug, true);
         } finally {
             removeDirectorySafely(tempRoot);

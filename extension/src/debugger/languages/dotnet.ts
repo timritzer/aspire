@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { extensionLogOutputChannel } from '../../utils/logging';
-import { noCsharpBuildTask, buildFailedWithExitCode, noOutputFromMsbuild, failedToGetTargetPath, invalidLaunchConfiguration, buildFailedForProjectWithError, processExitedWithCode, lookingForDevkitBuildTask, csharpDevKitNotInstalled, failedToInspectRuntimeConfig, dotNetRunFallbackDisablesDebugger, dotNetRunFileBasedExecutableProfileFallback, executableLaunchProfileMissingExecutablePath, explicitLaunchProfileNotResolved, launchProfileUnsupportedCommandName, launchProfileHasInvalidProperties } from '../../loc/strings';
+import { noCsharpBuildTask, buildFailedWithExitCode, noOutputFromMsbuild, failedToGetTargetPath, coordinatedBuildOutputMissing, invalidLaunchConfiguration, buildFailedForProjectWithError, processExitedWithCode, lookingForDevkitBuildTask, csharpDevKitNotInstalled, failedToInspectRuntimeConfig, dotNetRunFallbackDisablesDebugger, dotNetRunFileBasedExecutableProfileFallback, executableLaunchProfileMissingExecutablePath, explicitLaunchProfileNotResolved, launchProfileUnsupportedCommandName, launchProfileHasInvalidProperties } from '../../loc/strings';
 import { ChildProcessWithoutNullStreams, execFile, spawn } from 'child_process';
 import * as util from 'util';
 import * as path from 'path';
@@ -35,9 +35,9 @@ import { getAppHostLaunchProfileOptions } from '../../utils/launchProfile';
 
 interface IDotNetService {
     getAndActivateDevKit(): Promise<boolean>
-    buildDotNetProject(projectFile: string): Promise<void>;
-    getDotNetTargetPath(projectFile: string): Promise<string>;
-    getDotNetRunApiOutput(projectFile: string, environment?: NodeJS.ProcessEnv): Promise<string>;
+    buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void>;
+    getDotNetTargetPath(projectFile: string, buildConfiguration?: string): Promise<string>;
+    getDotNetRunApiOutput(projectFile: string, environment?: NodeJS.ProcessEnv, buildConfiguration?: string): Promise<string>;
 }
 
 export class DotNetService implements IDotNetService {
@@ -69,11 +69,14 @@ export class DotNetService implements IDotNetService {
         return Promise.resolve(true);
     }
 
-    async buildDotNetProject(projectFile: string): Promise<void> {
+    async buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void> {
         return new Promise<void>((resolve, reject) => {
             extensionLogOutputChannel.info(`Building .NET project: ${projectFile} using dotnet CLI`);
 
             const args = ['build', projectFile];
+            if (buildConfiguration) {
+                args.push('--configuration', buildConfiguration);
+            }
 
             void (async () => {
                 const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectFile)));
@@ -123,7 +126,7 @@ export class DotNetService implements IDotNetService {
         });
     }
 
-    async getDotNetTargetPath(projectFile: string): Promise<string> {
+    async getDotNetTargetPath(projectFile: string, buildConfiguration?: string): Promise<string> {
         const args = [
             'msbuild',
             projectFile,
@@ -132,6 +135,10 @@ export class DotNetService implements IDotNetService {
             '-v:q',
             '-property:GenerateFullPaths=true'
         ];
+        if (buildConfiguration) {
+            args.push(`-property:Configuration=${buildConfiguration}`);
+        }
+
         try {
             const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectFile)));
             const { stdout } = await this.execFileAsync('dotnet', args, {
@@ -150,7 +157,7 @@ export class DotNetService implements IDotNetService {
         }
     }
 
-    async getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv): Promise<string> {
+    async getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv, buildConfiguration?: string): Promise<string> {
         const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectPath)));
         let childProcess: ChildProcessWithoutNullStreams | undefined;
 
@@ -163,9 +170,16 @@ export class DotNetService implements IDotNetService {
             try {
                 extensionLogOutputChannel.info('dotnet run-api - starting process');
 
+                const runApiEnvironment = { ...process.env, ...environment };
+                if (buildConfiguration) {
+                    // run-api has no command-line option for Configuration. MSBuild imports environment
+                    // variables as properties, so use the standard Configuration property for evaluation.
+                    setEnvironmentVariable(runApiEnvironment, 'Configuration', buildConfiguration);
+                }
+
                 childProcess = spawn('dotnet', ['run-api'], {
                     cwd: path.dirname(projectPath),
-                    env: createResolvedAspireCliPathProcessEnvironment(cliPath, { ...process.env, ...environment }),
+                    env: createResolvedAspireCliPathProcessEnvironment(cliPath, runApiEnvironment),
                     stdio: ['pipe', 'pipe', 'pipe']
                 });
 
@@ -415,13 +429,39 @@ export function quoteCommandLineArgument(argument: string): string {
     return `"${escapedArgument}"`;
 }
 
-function createDotNetRunBaseArguments(projectPath: string, fileBased: boolean, skipBuild: boolean = false, runWorkingDirectory?: string, suppressCliRunHook: boolean = false): string[] {
+interface DotNetRunOptions {
+    fileBased?: boolean;
+    skipBuild?: boolean;
+    buildConfiguration?: string;
+    runWorkingDirectory?: string;
+    suppressCliRunHook?: boolean;
+}
+
+function createDotNetRunBaseArguments(projectPath: string, options: DotNetRunOptions = {}): string[] {
+    const {
+        fileBased = false,
+        skipBuild = false,
+        buildConfiguration,
+        runWorkingDirectory,
+        suppressCliRunHook = false
+    } = options;
+
     // File-based resources use --no-cache to avoid stale SDK cache entries. When the CLI already built a
     // file-based AppHost, use --no-build so this fallback launches that output without rebuilding it.
-    // Project files launch with `dotnet run --project <proj>`.
+    // Coordinated project builds also use --no-build so the IDE cannot rebuild an individual service.
     const dotnetRunArgs = fileBased
-        ? ['run', '--file', projectPath, skipBuild ? '--no-build' : '--no-cache', '--no-launch-profile']
-        : ['run', '--project', projectPath, '--no-launch-profile'];
+        ? ['run', '--file', projectPath, skipBuild ? '--no-build' : '--no-cache']
+        : ['run', '--project', projectPath];
+
+    if (!fileBased && skipBuild) {
+        dotnetRunArgs.push('--no-build');
+    }
+
+    if (buildConfiguration) {
+        dotnetRunArgs.push('--configuration', buildConfiguration);
+    }
+
+    dotnetRunArgs.push('--no-launch-profile');
 
     if (suppressCliRunHook) {
         dotnetRunArgs.push('--property:_AspireSuppressCliRunHook=true');
@@ -434,8 +474,8 @@ function createDotNetRunBaseArguments(projectPath: string, fileBased: boolean, s
     return dotnetRunArgs;
 }
 
-function createDotNetRunArguments(projectPath: string, baseProfileArgs: string | undefined, runSessionArgs: string[] | undefined, fileBased: boolean = false, skipBuild: boolean = false, runWorkingDirectory?: string, suppressCliRunHook: boolean = false): string[] | string {
-    const dotnetRunArgs = createDotNetRunBaseArguments(projectPath, fileBased, skipBuild, runWorkingDirectory, suppressCliRunHook);
+function createDotNetRunArguments(projectPath: string, baseProfileArgs: string | undefined, runSessionArgs: string[] | undefined, options: DotNetRunOptions = {}): string[] | string {
+    const dotnetRunArgs = createDotNetRunBaseArguments(projectPath, options);
     if (runSessionArgs !== undefined) {
         if (runSessionArgs.length > 0) {
             dotnetRunArgs.push('--', ...runSessionArgs);
@@ -451,10 +491,15 @@ function createDotNetRunArguments(projectPath: string, baseProfileArgs: string |
         // handles escaping consistently with normal project launches. Only the path token needs quoting.
         const quotedRunArgs = createDotNetRunBaseArguments(
             quoteCommandLineArgument(projectPath),
-            fileBased,
-            skipBuild,
-            runWorkingDirectory ? quoteCommandLineArgument(runWorkingDirectory) : undefined,
-            suppressCliRunHook);
+            {
+                ...options,
+                buildConfiguration: options.buildConfiguration
+                    ? quoteCommandLineArgument(options.buildConfiguration)
+                    : undefined,
+                runWorkingDirectory: options.runWorkingDirectory
+                    ? quoteCommandLineArgument(options.runWorkingDirectory)
+                    : undefined
+            });
         return `${quotedRunArgs.join(' ')} -- ${baseProfileArgs}`;
     }
 
@@ -744,9 +789,14 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
 
             const projectPath = launchConfig.project_path;
             const isFileBasedProject = isFileBasedApp(projectPath);
+            const buildConfiguration = launchConfig.build_configuration;
+            const suppressBuild = launchConfig.suppress_build === true;
+            // The hosting integration currently suppresses only coordinated .csproj builds. File-based
+            // AppHosts use forceBuild=false after the CLI builds them, but keep this generic for future producers.
             // Newer CLIs build file-based AppHosts before asking the extension to launch them. Keep
             // extension-owned builds for file-based resources and older CLIs.
-            const shouldBuildProject = !isFileBasedProject || !launchOptions.isApphost || launchOptions.forceBuild !== false;
+            const shouldBuildProject = !suppressBuild &&
+                (!isFileBasedProject || !launchOptions.isApphost || launchOptions.forceBuild !== false);
 
             extensionLogOutputChannel.info(`Reading launch settings for: ${projectPath}`);
 
@@ -869,7 +919,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                 // Expand environment variable references (e.g. $(HOME)) that VS handles natively
                 // but aren't expanded by the coreclr debugger.
                 if (shouldBuildProject) {
-                    await dotNetService.buildDotNetProject(projectPath);
+                    await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
                 }
 
                 debugConfiguration.program = expandEnvironmentVariables(baseProfile.executablePath);
@@ -886,9 +936,14 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
             }
             else if (!isFileBasedProject) {
                 const dotNetService: IDotNetService = dotNetServiceProducer(launchOptions.debugSession);
-                const outputPath = await dotNetService.getDotNetTargetPath(projectPath);
-                if ((!(await doesFileExist(outputPath)) || launchOptions.forceBuild)) {
-                    await dotNetService.buildDotNetProject(projectPath);
+                const outputPath = await dotNetService.getDotNetTargetPath(projectPath, buildConfiguration);
+                const outputExists = await doesFileExist(outputPath);
+                if (!outputExists && suppressBuild) {
+                    throw new Error(coordinatedBuildOutputMissing(projectPath, outputPath));
+                }
+
+                if (!suppressBuild && (!outputExists || launchOptions.forceBuild)) {
+                    await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
                 }
 
                 if (await shouldLaunchProjectWithDotNetRun(outputPath)) {
@@ -900,7 +955,10 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
 
                     configureDotNetRunDebugConfiguration(
                         debugConfiguration,
-                        createDotNetRunArguments(projectPath, profileCommandLineArgs, args),
+                        createDotNetRunArguments(projectPath, profileCommandLineArgs, args, {
+                            skipBuild: suppressBuild,
+                            buildConfiguration
+                        }),
                         createProjectEnvironment(launchSettings, baseProfile, profileName, effectiveLaunchConfig.disable_launch_profile === true, debugConfiguration.env, env, launchOptions));
                 } else {
                     debugConfiguration.program = outputPath;
@@ -939,7 +997,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
 
                     if (shouldBuildProject) {
                         // There may be an older cached version of the file-based app, so force a build.
-                        await dotNetService.buildDotNetProject(projectPath);
+                        await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
                     }
 
                     const projectDirectory = path.dirname(projectPath);
@@ -950,10 +1008,13 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                             projectPath,
                             profileCommandLineArgs,
                             args,
-                            /* fileBased */ true,
-                            /* skipBuild */ !shouldBuildProject,
-                            runWorkingDirectory,
-                            /* suppressCliRunHook */ launchOptions.isApphost),
+                            {
+                                fileBased: true,
+                                skipBuild: !shouldBuildProject,
+                                buildConfiguration,
+                                runWorkingDirectory,
+                                suppressCliRunHook: launchOptions.isApphost
+                            }),
                         createProjectEnvironment(launchSettings, baseProfile, profileName, effectiveLaunchConfig.disable_launch_profile === true, debugConfiguration.env, env, launchOptions),
                         projectDirectory);
                 }
@@ -963,12 +1024,12 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                     // The Aspire SDK run hook would rewrite an AppHost RunCommand to `aspire run`, but the CLI
                     // already owns this launch. Suppress the hook so run-api returns the generated executable.
                     const runApiEnvironment = launchOptions.isApphost ? { ASPIRE_SUPPRESS_CLI_RUN_HOOK: 'true' } : undefined;
-                    const runApiOutput = await dotNetService.getDotNetRunApiOutput(projectPath, runApiEnvironment);
+                    const runApiOutput = await dotNetService.getDotNetRunApiOutput(projectPath, runApiEnvironment, buildConfiguration);
                     const runApiConfig = getRunApiConfigFromOutput(runApiOutput);
 
                     if (shouldBuildProject) {
                         // There may be an older cached version of the file-based app, so force a build.
-                        await dotNetService.buildDotNetProject(projectPath);
+                        await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
                     }
 
                     debugConfiguration.program = runApiConfig.executablePath;

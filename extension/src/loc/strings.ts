@@ -54,6 +54,7 @@ export const noWatchTask = vscode.l10n.t('No watch task found. Please ensure a w
 export const buildFailedWithExitCode = (exitCode: number | string) => vscode.l10n.t('Build failed with exit code {0}.', exitCode);
 export const noOutputFromMsbuild = vscode.l10n.t('No output from msbuild.');
 export const failedToGetTargetPath = (err: string) => vscode.l10n.t('Failed to get TargetPath: {0}.', err);
+export const coordinatedBuildOutputMissing = (projectPath: string, outputPath: string) => vscode.l10n.t('The coordinated build output {1} for project {0} does not exist. Aspire will not rebuild the project independently.', projectPath, outputPath);
 export const unsupportedResourceType = (type: string) => vscode.l10n.t('Attempted to start unsupported resource type: {0}.', type);
 export const rpcServerNotInitialized = vscode.l10n.t('RPC server is not initialized.');
 export const extensionContextNotInitialized = vscode.l10n.t('Extension context is not initialized.');

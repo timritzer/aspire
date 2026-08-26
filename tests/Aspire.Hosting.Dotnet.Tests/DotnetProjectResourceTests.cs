@@ -551,6 +551,10 @@ public class DotnetProjectResourceTests(ITestOutputHelper outputHelper)
         Assert.Equal(projectPath, launchConfig.ProjectPath);
         Assert.True(launchConfig.DisableLaunchProfile);
         Assert.Equal(string.Empty, launchConfig.LaunchProfile);
+        Assert.Equal(
+            builder.AppHostAssembly?.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration,
+            launchConfig.BuildConfiguration);
+        Assert.True(launchConfig.SuppressBuild);
     }
 
     [Fact]

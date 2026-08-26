@@ -32,9 +32,4 @@
       <LogicalName>Aspire.Hosting.Resources.LaunchProfileStrings.resources</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
-
-  <ItemGroup>
-    <InternalsVisibleTo Include="Aspire.Hosting.Dotnet.Tests" />
-  </ItemGroup>
-
 </Project>

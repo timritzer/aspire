@@ -107,7 +107,11 @@ public static class DotnetProjectHostingExtensions
         configure(options);
 
         path = PathNormalizer.NormalizePathForCurrentPlatform(Path.Combine(builder.AppHostDirectory, path));
-        var projectMetadata = new DotnetProjectMetadata(path);
+
+        // The app host's own build configuration (Debug/Release) is propagated to every child launch
+        // so process and IDE launchers resolve the output produced by the coordinated build.
+        var configuration = builder.AppHostAssembly?.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration;
+        var projectMetadata = new DotnetProjectMetadata(path, configuration);
 
         // ExecutableResource requires a working directory. Use the project/app directory so the process
         // launches from the same place a ProjectResource would (DCP used Path.GetDirectoryName(ProjectPath)).
@@ -118,16 +122,12 @@ public static class DotnetProjectHostingExtensions
 
         var app = new DotnetProjectResource(name, workingDirectory);
 
-        // The app host's own build configuration (Debug/Release) is propagated to the child `dotnet run`
-        // so the service matches the app host, mirroring DistributedApplicationOptions.Configuration.
-        var configuration = builder.AppHostAssembly?.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration;
-
         var resource = builder.AddResource(app)
                               .WithAnnotation(projectMetadata)
                               .WithIconName("CodeCsRectangle")
                               .WithProjectDefaults(options);
 
-        DotnetProjectBuildCoordinator.Configure(resource, projectMetadata, configuration);
+        DotnetProjectBuildCoordinator.Configure(resource, projectMetadata);
 
         // Declare the default `dotnet run` invocation separately from the program arguments so a later
         // WithLaunchToolArgs call replaces it instead of being prepended to it:
@@ -157,10 +157,10 @@ public static class DotnetProjectHostingExtensions
                 ctx.Args.Add("--no-build");
             }
 
-            if (!string.IsNullOrEmpty(configuration))
+            if (!string.IsNullOrEmpty(projectMetadata.BuildConfiguration))
             {
                 ctx.Args.Add("--configuration");
-                ctx.Args.Add(configuration);
+                ctx.Args.Add(projectMetadata.BuildConfiguration);
             }
 
             // Always suppress the normal launch profile handling: the profile's settings would otherwise

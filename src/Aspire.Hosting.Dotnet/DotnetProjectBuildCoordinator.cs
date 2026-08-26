@@ -22,8 +22,7 @@ internal static class DotnetProjectBuildCoordinator
 
     public static void Configure(
         IResourceBuilder<DotnetProjectResource> resourceBuilder,
-        DotnetProjectMetadata projectMetadata,
-        string? configuration)
+        DotnetProjectMetadata projectMetadata)
     {
         if (!resourceBuilder.ApplicationBuilder.ExecutionContext.IsRunMode)
         {
@@ -38,7 +37,7 @@ internal static class DotnetProjectBuildCoordinator
         if (IsProjectFile(projectPath))
         {
             projectMetadata.SuppressBuild = true;
-            buildResource ??= AddBuildResource(resourceBuilder.ApplicationBuilder, configuration);
+            buildResource ??= AddBuildResource(resourceBuilder.ApplicationBuilder, projectMetadata.BuildConfiguration);
             buildResource.AddProject(projectPath);
         }
 

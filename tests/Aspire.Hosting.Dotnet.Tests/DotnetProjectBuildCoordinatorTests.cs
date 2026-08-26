@@ -208,21 +208,28 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
-    [SkipOnPlatform(TestPlatforms.Windows, "Windows paths that differ only by casing identify the same project.")]
-    public void CaseDistinctProjectPathsFailInsteadOfSilentlySuppressingOneBuild()
+    public void CaseVariantProjectPathsFollowFilesystemIdentity()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var buildResource = new DotnetProjectBuildResource(
             DotnetProjectBuildCoordinator.BuildResourceName,
             workspace.Path);
-        var firstPath = Path.Combine(workspace.Path, "Service", "App.csproj");
-        var secondPath = Path.Combine(workspace.Path, "service", "App.csproj");
+        var firstPath = CreateProject(workspace.Path, "Service", "App.csproj");
+        var caseVariantPath = Path.Combine(workspace.Path, "service", "app.CSPROJ");
 
         buildResource.AddProject(firstPath);
 
-        var exception = Assert.Throws<DistributedApplicationException>(
-            () => buildResource.AddProject(secondPath));
-        Assert.Contains("differ only by letter casing", exception.Message);
+        if (File.Exists(caseVariantPath))
+        {
+            buildResource.AddProject(caseVariantPath);
+            Assert.Equal([firstPath], buildResource.ProjectPaths);
+        }
+        else
+        {
+            var secondPath = CreateProject(workspace.Path, "service", "app.CSPROJ");
+            buildResource.AddProject(secondPath);
+            Assert.Equal([firstPath, secondPath], buildResource.ProjectPaths);
+        }
     }
 
     [Fact]

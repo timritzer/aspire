@@ -122,4 +122,24 @@ public sealed class ProjectLaunchConfiguration() : ExecutableLaunchConfiguration
     /// </summary>
     [JsonPropertyName("project_path")]
     public required string ProjectPath { get; set; }
+
+    /// <summary>
+    /// Gets or sets the build configuration used to produce the project output.
+    /// </summary>
+    /// <remarks>
+    /// The value corresponds to the MSBuild <c>Configuration</c> property, such as <c>Debug</c> or <c>Release</c>.
+    /// </remarks>
+    [JsonPropertyName("build_configuration")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildConfiguration { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the IDE should suppress building the project before launch.
+    /// </summary>
+    /// <remarks>
+    /// When <see langword="true"/>, the project output was produced by an external or coordinated build and the IDE should launch it without rebuilding.
+    /// </remarks>
+    [JsonPropertyName("suppress_build")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool SuppressBuild { get; set; }
 }

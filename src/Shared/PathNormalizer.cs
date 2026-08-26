@@ -28,61 +28,106 @@ internal static class PathNormalizer
     }
 
     /// <summary>
-    /// On Windows, resolves a path to its filesystem-canonical form by querying the OS for
-    /// the actual casing of each path component. On other platforms this is a no-op because
-    /// the file system is case-sensitive and there is no casing ambiguity.
+    /// Resolves an existing path to its filesystem-canonical form by using the actual casing
+    /// of each path component.
     /// </summary>
     /// <remarks>
-    /// Use this when the path needs to match what MSBuild reports for the same file.
-    /// MSBuild always uses the true filesystem casing; a user who types
-    /// <c>--apphost c:\FOO\bar.csproj</c> will get back <c>C:\foo\bar.csproj</c>
-    /// if that is the on-disk casing, making the hash agree with the AppHost side.
+    /// <para>
+    /// Use this when a path must match what MSBuild or another filesystem enumerator reports for the same file.
+    /// Case behavior belongs to the containing volume rather than the operating system: macOS commonly uses
+    /// case-insensitive volumes, while Windows directories can opt into case sensitivity.
+    /// </para>
+    /// <para>
+    /// The path is returned unchanged when it does not exist or its on-disk casing cannot be resolved.
+    /// </para>
     /// </remarks>
-    /// <param name="path">An absolute path to a file that exists on disk.</param>
+    /// <param name="path">A path to a file or directory.</param>
     /// <returns>
-    /// The path with OS-canonical casing, or <paramref name="path"/> unchanged if it
-    /// cannot be resolved (file does not exist, UNC path, etc.).
+    /// The path with filesystem-canonical casing, or <paramref name="path"/> unchanged if it cannot be resolved.
     /// </returns>
     public static string ResolveToFilesystemPath(string path)
     {
-        if (!OperatingSystem.IsWindows())
+        if (string.IsNullOrEmpty(path))
         {
             return path;
         }
 
-        // Only handle standard drive-letter paths (e.g. C:\...).
-        // UNC paths (\\server\share\...) are not common for project files and are left unchanged.
-        if (path.Length < 3 || path[1] != ':' || path[2] != Path.DirectorySeparatorChar)
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
+            {
+                return path;
+            }
+
+            var root = Path.GetPathRoot(fullPath);
+            if (string.IsNullOrEmpty(root))
+            {
+                return path;
+            }
+
+            if (OperatingSystem.IsWindows() && root.Length >= 2 && root[1] == ':')
+            {
+                root = char.ToUpperInvariant(root[0]) + root[1..];
+            }
+
+            var segments = fullPath[root.Length..].Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+            var current = root;
+
+            foreach (var segment in segments)
+            {
+                string? exactMatch = null;
+                string? caseInsensitiveMatch = null;
+                var caseInsensitiveMatchIsAmbiguous = false;
+
+                foreach (var candidate in Directory.EnumerateFileSystemEntries(current))
+                {
+                    var candidateName = Path.GetFileName(candidate);
+                    if (string.Equals(candidateName, segment, StringComparison.Ordinal))
+                    {
+                        exactMatch = candidate;
+                        break;
+                    }
+
+                    if (string.Equals(candidateName, segment, StringComparison.OrdinalIgnoreCase))
+                    {
+                        caseInsensitiveMatchIsAmbiguous = caseInsensitiveMatch is not null;
+                        caseInsensitiveMatch ??= candidate;
+                    }
+                }
+
+                // More than one case-insensitive match is possible on a case-sensitive volume.
+                // Prefer an exact match regardless of enumeration order; otherwise require one unique match.
+                var matchingPath = exactMatch ??
+                    (caseInsensitiveMatchIsAmbiguous ? null : caseInsensitiveMatch);
+                if (matchingPath is null)
+                {
+                    return path;
+                }
+
+                current = matchingPath;
+            }
+
+            return current;
+        }
+        catch (IOException)
         {
             return path;
         }
-
-        // Uppercase the drive letter and use it as the starting root (e.g. "C:\").
-        var current = char.ToUpperInvariant(path[0]) + ":" + Path.DirectorySeparatorChar;
-
-        // Walk each component after the root ("X:\") to resolve its real casing.
-        var parts = path[3..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
-
-        for (var i = 0; i < parts.Length; i++)
+        catch (UnauthorizedAccessException)
         {
-            if (i == parts.Length - 1)
-            {
-                // Final component: find the file with its real name.
-                var files = Directory.GetFiles(current, parts[i]);
-                return files.Length == 1 ? files[0] : Path.Combine(current, parts[i]);
-            }
-
-            // Intermediate component: find the directory with its real name.
-            var dirs = Directory.GetDirectories(current, parts[i]);
-            current = dirs.Length == 1 ? dirs[0] : Path.Combine(current, parts[i]);
-
-            if (!current.EndsWith(Path.DirectorySeparatorChar))
-            {
-                current += Path.DirectorySeparatorChar;
-            }
+            return path;
         }
-
-        return path;
+        catch (ArgumentException)
+        {
+            return path;
+        }
+        catch (NotSupportedException)
+        {
+            return path;
+        }
     }
 
     /// <summary>

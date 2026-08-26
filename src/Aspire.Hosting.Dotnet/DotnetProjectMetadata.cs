@@ -10,13 +10,15 @@ namespace Aspire.Hosting.Dotnet;
 /// Project metadata for a C# project or file-based app that was added by path.
 /// </summary>
 [DebuggerDisplay("Type = {GetType().Name,nq}, ProjectPath = {ProjectPath}")]
-internal sealed class DotnetProjectMetadata(string projectPath) : IProjectMetadata
+internal sealed class DotnetProjectMetadata(string projectPath, string? buildConfiguration) : IProjectMetadata
 {
     private string? _resolvedProjectPath;
 
     // Resolution is deferred so construction never touches the file system; an unresolvable path is
     // reported as a resource start failure instead.
     public string ProjectPath => _resolvedProjectPath ??= ProjectPathResolver.ResolveProjectPath(projectPath);
+
+    public string? BuildConfiguration { get; } = buildConfiguration;
 
     public bool SuppressBuild { get; set; }
 }

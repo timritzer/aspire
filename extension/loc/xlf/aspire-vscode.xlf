@@ -934,6 +934,9 @@
     <trans-unit id="aspire-vscode.strings.azureFunctionsUnsupportedTaskShell">
       <source xml:lang="en">The configured VS Code task shell is not supported for Azure Functions launch arguments. Configure terminal.integrated.automationProfile to use PowerShell, Command Prompt, bash, zsh, fish, or WSL.</source>
     </trans-unit>
+    <trans-unit id="aspire-vscode.strings.coordinatedBuildOutputMissing">
+      <source xml:lang="en">The coordinated build output {1} for project {0} does not exist. Aspire will not rebuild the project independently.</source>
+    </trans-unit>
     <trans-unit id="aspire-vscode.strings.rustWindowsGnuDebuggerUnsupported">
       <source xml:lang="en">The cppvsdbg debugger cannot debug Rust target {0} because GNU Windows targets use DWARF symbols. Install CodeLLDB or build an MSVC Rust target such as x86_64-pc-windows-msvc.</source>
     </trans-unit>
