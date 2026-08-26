@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { extensionLogOutputChannel } from '../../utils/logging';
-import { noCsharpBuildTask, buildFailedWithExitCode, noOutputFromMsbuild, failedToGetTargetPath, coordinatedBuildOutputMissing, invalidLaunchConfiguration, buildFailedForProjectWithError, processExitedWithCode, lookingForDevkitBuildTask, csharpDevKitNotInstalled, failedToInspectRuntimeConfig, dotNetRunFallbackDisablesDebugger, dotNetRunFileBasedExecutableProfileFallback, executableLaunchProfileMissingExecutablePath, explicitLaunchProfileNotResolved, launchProfileUnsupportedCommandName, launchProfileHasInvalidProperties } from '../../loc/strings';
+import { noCsharpBuildTask, buildFailedWithExitCode, noOutputFromMsbuild, failedToGetTargetPath, prebuiltProjectOutputMissing, invalidLaunchConfiguration, buildFailedForProjectWithError, processExitedWithCode, lookingForDevkitBuildTask, csharpDevKitNotInstalled, failedToInspectRuntimeConfig, dotNetRunFallbackDisablesDebugger, dotNetRunFileBasedExecutableProfileFallback, executableLaunchProfileMissingExecutablePath, explicitLaunchProfileNotResolved, launchProfileUnsupportedCommandName, launchProfileHasInvalidProperties } from '../../loc/strings';
 import { ChildProcessWithoutNullStreams, execFile, spawn } from 'child_process';
 import * as util from 'util';
 import * as path from 'path';
@@ -791,8 +791,8 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
             const isFileBasedProject = isFileBasedApp(projectPath);
             const buildConfiguration = launchConfig.build_configuration;
             const suppressBuild = launchConfig.suppress_build === true;
-            // The hosting integration currently suppresses only coordinated .csproj builds. File-based
-            // AppHosts use forceBuild=false after the CLI builds them, but keep this generic for future producers.
+            // Classic AppHost builds and coordinated project builds can both produce output before this launch
+            // and suppress extension-owned builds. File-based AppHosts use forceBuild=false after the CLI builds them.
             // Newer CLIs build file-based AppHosts before asking the extension to launch them. Keep
             // extension-owned builds for file-based resources and older CLIs.
             const shouldBuildProject = !suppressBuild &&
@@ -939,7 +939,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                 const outputPath = await dotNetService.getDotNetTargetPath(projectPath, buildConfiguration);
                 const outputExists = await doesFileExist(outputPath);
                 if (!outputExists && suppressBuild) {
-                    throw new Error(coordinatedBuildOutputMissing(projectPath, outputPath));
+                    throw new Error(prebuiltProjectOutputMissing(projectPath, outputPath));
                 }
 
                 if (!suppressBuild && (!outputExists || launchOptions.forceBuild)) {

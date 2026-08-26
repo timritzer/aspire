@@ -249,12 +249,12 @@ public class ScaffoldingServiceTests
     }
 
     [Fact]
-    public void MergeGitIgnoreContent_AppendsMissingEntriesWithoutOverwritingExistingContent()
+    public void GitIgnoreMerger_AppendsMissingEntriesWithoutOverwritingExistingContent()
     {
         var existingContent = "node_modules/\ncustom/\n";
         var scaffoldContent = "node_modules/\ndist/\n.aspire/\n";
 
-        var mergedContent = ScaffoldingService.MergeGitIgnoreContent(existingContent, scaffoldContent);
+        var mergedContent = GitIgnoreMerger.Merge(existingContent, scaffoldContent);
         var lines = mergedContent.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         Assert.Equal(
@@ -408,12 +408,12 @@ public class ScaffoldingServiceTests
     }
 
     [Fact]
-    public void MergeGitIgnoreContent_DoesNotAddDuplicateAspireEntryWhenEquivalentEntryAlreadyExists()
+    public void GitIgnoreMerger_DoesNotAddDuplicateAspireEntryWhenEquivalentEntryAlreadyExists()
     {
         var existingContent = "/.aspire/\n";
         var scaffoldContent = ".aspire/\n";
 
-        var mergedContent = ScaffoldingService.MergeGitIgnoreContent(existingContent, scaffoldContent);
+        var mergedContent = GitIgnoreMerger.Merge(existingContent, scaffoldContent);
 
         Assert.Equal(existingContent, mergedContent);
     }

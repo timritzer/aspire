@@ -6,6 +6,7 @@
 using System.Globalization;
 using Aspire.Hosting.ApplicationModel;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Aspire.Hosting.Dotnet;
 
@@ -20,27 +21,34 @@ internal static class DotnetProjectBuildCoordinator
 
     internal const string BuildResourceName = "__dotnet-project-build";
 
-    public static void Configure(
-        IResourceBuilder<DotnetProjectResource> resourceBuilder,
+    public static DotnetProjectBuildResource? Prepare(
+        IDistributedApplicationBuilder builder,
         DotnetProjectMetadata projectMetadata)
     {
-        if (!resourceBuilder.ApplicationBuilder.ExecutionContext.IsRunMode)
+        if (!builder.ExecutionContext.IsRunMode)
         {
-            return;
+            return null;
         }
 
         var projectPath = projectMetadata.ProjectPath;
-        var buildResource = resourceBuilder.ApplicationBuilder.Resources
+        var buildResource = builder.Resources
             .OfType<DotnetProjectBuildResource>()
             .SingleOrDefault();
 
         if (IsProjectFile(projectPath))
         {
             projectMetadata.SuppressBuild = true;
-            buildResource ??= AddBuildResource(resourceBuilder.ApplicationBuilder, projectMetadata.BuildConfiguration);
-            buildResource.AddProject(projectPath);
+            buildResource ??= AddBuildResource(builder, projectMetadata.BuildConfiguration);
+            projectMetadata.SetProjectPath(buildResource.AddProject(projectPath));
         }
 
+        return buildResource;
+    }
+
+    public static void Configure(
+        IResourceBuilder<DotnetProjectResource> resourceBuilder,
+        DotnetProjectBuildResource? buildResource)
+    {
         if (buildResource is null)
         {
             return;
@@ -63,13 +71,18 @@ internal static class DotnetProjectBuildCoordinator
         IDistributedApplicationBuilder builder,
         string? configuration)
     {
-        var buildResource = new DotnetProjectBuildResource(BuildResourceName, builder.AppHostDirectory);
+        var buildResource = new DotnetProjectBuildResource(BuildResourceName, builder.AppHostDirectory, TimeProvider.System);
         buildResource.Annotations.Add(NameValidationPolicyAnnotation.None);
+        builder.Eventing.Subscribe<BeforeStartEvent>((@event, _) =>
+        {
+            buildResource.RegisterForShutdown(@event.Services.GetRequiredService<IHostApplicationLifetime>());
+            return Task.CompletedTask;
+        });
 
         builder.AddResource(buildResource)
             .WithArgs(async context =>
             {
-                var solutionPath = await buildResource.WriteSolutionAsync(context.CancellationToken).ConfigureAwait(false);
+                var solutionPath = await buildResource.WriteSolutionAsync(context.Logger, context.CancellationToken).ConfigureAwait(false);
 
                 context.Args.Add("build");
                 context.Args.Add(solutionPath);

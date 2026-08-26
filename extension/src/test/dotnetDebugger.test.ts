@@ -599,7 +599,7 @@ suite('Dotnet Debugger Extension Tests', () => {
         assert.strictEqual(dotNetService.buildDotNetProjectStub.notCalled, true);
     });
 
-    test('coordinated project launch uses the configured output without rebuilding', async () => {
+    test('project launch with suppressed build uses the configured output without rebuilding', async () => {
         const outputPath = 'C:\\temp\\bin\\Release\\net10.0\\TestProject.dll';
         const { extension, dotNetService } = createDebuggerExtension(outputPath, null, true, true);
         const projectPath = 'C:\\temp\\TestProject.csproj';
@@ -630,7 +630,7 @@ suite('Dotnet Debugger Extension Tests', () => {
         assert.strictEqual(debugConfig.program, outputPath);
     });
 
-    test('coordinated project launch fails instead of rebuilding when output is missing', async () => {
+    test('project launch with suppressed build fails instead of rebuilding when expected output is missing', async () => {
         const outputPath = 'C:\\temp\\bin\\Release\\net10.0\\TestProject.dll';
         const { extension, dotNetService } = createDebuggerExtension(outputPath, null, true, false);
         const projectPath = 'C:\\temp\\TestProject.csproj';
@@ -656,7 +656,7 @@ suite('Dotnet Debugger Extension Tests', () => {
                 [],
                 { debug: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession },
                 debugConfig),
-            /coordinated build output .* does not exist/i);
+            /expected prebuilt output .* does not exist.*building is suppressed/i);
 
         assert.ok(dotNetService.buildDotNetProjectStub.notCalled);
     });
@@ -2424,6 +2424,53 @@ suite('Dotnet Debugger Extension Tests', () => {
 
         assert.strictEqual(debugConfig.program, outputPath);
         assert.strictEqual(debugConfig.noDebug, true);
+    });
+
+    test('uses dotnet CLI when project runtimeconfig has no runnable framework', async () => {
+        const fs = require('fs');
+        const path = require('path');
+
+        const tempRoot = path.join(process.cwd(), '.test-temp', `dotnet-debugger-${process.pid}-${Date.now()}`);
+        const projectDir = path.join(tempRoot, 'Frontend With Spaces');
+        const outputDir = path.join(projectDir, 'bin', 'Debug', 'net10.0');
+        fs.mkdirSync(outputDir, { recursive: true });
+
+        try {
+            const projectPath = path.join(projectDir, 'Frontend.csproj');
+            const outputPath = path.join(outputDir, 'Frontend.dll');
+            fs.writeFileSync(projectPath, '<Project></Project>');
+            fs.writeFileSync(outputPath, '');
+            fs.writeFileSync(path.join(outputDir, 'Frontend.runtimeconfig.json'), JSON.stringify({
+                runtimeOptions: {
+                    tfm: 'net10.0'
+                }
+            }));
+
+            const { extension } = createDebuggerExtension(outputPath, null, true, true);
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: projectPath
+            };
+
+            const debugConfig: AspireResourceExtendedDebugConfiguration = {
+                runId: '1',
+                debugSessionId: '1',
+                type: 'coreclr',
+                name: 'Test Debug Config',
+                request: 'launch'
+            };
+
+            const fakeAspireDebugSession = sinon.createStubInstance(AspireDebugSession);
+
+            await extension.createDebugSessionConfigurationCallback!(launchConfig, ['--message', 'hello world'], [], { debug: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession }, debugConfig);
+
+            assert.strictEqual(debugConfig.type, 'coreclr');
+            assert.strictEqual(debugConfig.program, 'dotnet');
+            assert.deepStrictEqual(debugConfig.args, ['run', '--project', projectPath, '--no-launch-profile', '--', '--message', 'hello world']);
+            assert.strictEqual(debugConfig.noDebug, true);
+        } finally {
+            removeDirectorySafely(tempRoot);
+        }
     });
 
     test('coordinated project uses configured dotnet CLI fallback without rebuilding', async () => {

@@ -599,7 +599,7 @@ public static class ProjectResourceBuilderExtensions
         // In run mode, create a hidden rebuilder resource for this project.
         if (builder.ApplicationBuilder.ExecutionContext.IsRunMode)
         {
-            AddRebuilderResource(builder, projectResource);
+            AddRebuilderResource(builder, projectResource, launchDefaults);
         }
 
         if (builder.ApplicationBuilder.ExecutionContext.IsPublishMode)
@@ -1056,7 +1056,10 @@ public static class ProjectResourceBuilderExtensions
     /// <summary>
     /// Creates a hidden rebuilder resource that runs 'dotnet build' on demand via the rebuild command.
     /// </summary>
-    private static void AddRebuilderResource<TProjectResource>(IResourceBuilder<TProjectResource> builder, TProjectResource projectResource)
+    private static void AddRebuilderResource<TProjectResource>(
+        IResourceBuilder<TProjectResource> builder,
+        TProjectResource projectResource,
+        ProjectLaunchDefaultsAnnotation launchDefaults)
         where TProjectResource : class, IResource
     {
         var projectMetadata = projectResource.GetProjectMetadata();
@@ -1071,7 +1074,17 @@ public static class ProjectResourceBuilderExtensions
         var rebuilderBuilder = builder.ApplicationBuilder.AddResource(rebuilder);
 
         rebuilderBuilder
-            .WithArgs("build", projectMetadata.ProjectPath)
+            .WithArgs(context =>
+            {
+                context.Args.Add("build");
+                context.Args.Add(projectMetadata.ProjectPath);
+
+                if (!string.IsNullOrEmpty(launchDefaults.BuildConfiguration))
+                {
+                    context.Args.Add("--configuration");
+                    context.Args.Add(launchDefaults.BuildConfiguration);
+                }
+            })
             .WithAnnotation(new ExplicitStartupAnnotation())
             .WithAnnotation(new ExcludeLifecycleCommandsAnnotation())
             .ExcludeFromManifest()

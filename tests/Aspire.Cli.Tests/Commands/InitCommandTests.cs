@@ -172,6 +172,63 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task InitCommand_SingleFileSkeleton_CreatesGitIgnoreIdempotently()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+
+        var firstExitCode = await initCommand.Parse("init --suppress-agent-init").InvokeAsync().DefaultTimeout();
+        var secondExitCode = await initCommand.Parse("init --suppress-agent-init").InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, firstExitCode);
+        Assert.Equal(CliExitCodes.Success, secondExitCode);
+        Assert.Equal(".aspire/\n", await File.ReadAllTextAsync(Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore")));
+    }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public async Task InitCommand_SingleFileSkeleton_MergesGitIgnorePreservingContentAndNewlines(string newline)
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+
+        var gitIgnorePath = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        var existingContent = $"bin/{newline}custom/";
+        await File.WriteAllTextAsync(gitIgnorePath, existingContent);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+
+        var exitCode = await initCommand.Parse("init --suppress-agent-init").InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.Equal($"{existingContent}{newline}.aspire/{newline}", await File.ReadAllTextAsync(gitIgnorePath));
+    }
+
+    [Fact]
+    public async Task InitCommand_SingleFileSkeleton_PreservesEquivalentRootedGitIgnoreEntry()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+
+        var gitIgnorePath = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        const string existingContent = "# Keep this comment\r\n/.aspire/\r\n";
+        await File.WriteAllTextAsync(gitIgnorePath, existingContent);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+
+        var exitCode = await initCommand.Parse("init --suppress-agent-init").InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.Equal(existingContent, await File.ReadAllTextAsync(gitIgnorePath));
+    }
+
+    [Fact]
     public async Task InitCommand_SingleFileSkeleton_CreatesAppHostRunJsonWithDashboardEnvVars()
     {
         // Regression for https://github.com/microsoft/aspire/issues/15986: without

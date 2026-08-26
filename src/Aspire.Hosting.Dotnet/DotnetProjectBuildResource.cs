@@ -4,6 +4,8 @@
 using System.IO.Hashing;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Utils;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.SolutionPersistence.Model;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 
@@ -12,16 +14,19 @@ namespace Aspire.Hosting.Dotnet;
 /// <summary>
 /// Builds the traditional .NET projects in a distributed application before they start.
 /// </summary>
-internal sealed class DotnetProjectBuildResource : ExecutableResource
+internal sealed class DotnetProjectBuildResource : ExecutableResource, IDisposable
 {
     private readonly object _lock = new();
     private readonly List<string> _projectPaths = [];
+    private readonly Dictionary<string, string> _projectPathsByIdentity = new(StringComparer.Ordinal);
+    private readonly DotnetProjectBuildArtifactManager _artifactManager;
     private bool _solutionGenerationStarted;
 
-    public DotnetProjectBuildResource(string name, string workingDirectory)
+    public DotnetProjectBuildResource(string name, string workingDirectory, TimeProvider timeProvider)
         : base(name, "dotnet", workingDirectory)
     {
         SolutionDirectory = Path.Combine(workingDirectory, ".aspire", "build");
+        _artifactManager = new DotnetProjectBuildArtifactManager(SolutionDirectory, timeProvider);
     }
 
     /// <summary>
@@ -44,11 +49,16 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource
     }
 
     /// <summary>
-    /// Adds a project to the generated solution.
+    /// Adds a project to the generated solution and returns the path used by the coordinated build.
     /// </summary>
-    public void AddProject(string projectPath)
+    public string AddProject(string projectPath)
     {
         var fullPath = PathNormalizer.ResolveToFilesystemPath(Path.GetFullPath(projectPath));
+        // Keep the first path spelling in the solution so it stays relative to the AppHost directory,
+        // but deduplicate by physical identity so a symlink alias cannot build the same project twice.
+        // Every resource for that identity must launch this returned path so MSBuild uses the same
+        // project directory, intermediate outputs, and final output that the coordinated build used.
+        var projectIdentity = PathNormalizer.ResolveSymlinks(fullPath);
 
         lock (_lock)
         {
@@ -57,17 +67,21 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource
                 throw new InvalidOperationException("Projects cannot be added after the coordinated build solution has been generated.");
             }
 
-            if (!_projectPaths.Contains(fullPath, StringComparer.Ordinal))
+            if (_projectPathsByIdentity.TryGetValue(projectIdentity, out var coordinatedProjectPath))
             {
-                _projectPaths.Add(fullPath);
+                return coordinatedProjectPath;
             }
+
+            _projectPathsByIdentity.Add(projectIdentity, fullPath);
+            _projectPaths.Add(fullPath);
+            return fullPath;
         }
     }
 
     /// <summary>
     /// Writes the generated solution to the AppHost-local build directory.
     /// </summary>
-    public Task<string> WriteSolutionAsync(CancellationToken cancellationToken)
+    public Task<string> WriteSolutionAsync(ILogger logger, CancellationToken cancellationToken)
     {
         IReadOnlyList<string> projectPaths;
         lock (_lock)
@@ -78,11 +92,26 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource
 
         // The argument callback already caches successful evaluation for one start attempt. Regenerate here
         // on later attempts so cancellation, transient I/O failures, or cache cleanup cannot poison restarts.
-        return WriteSolutionCoreAsync(projectPaths, cancellationToken);
+        return WriteSolutionCoreAsync(projectPaths, logger, cancellationToken);
+    }
+
+    /// <summary>
+    /// Registers process-lifetime cleanup for the generated-solution leases.
+    /// </summary>
+    public void RegisterForShutdown(IHostApplicationLifetime applicationLifetime)
+    {
+        _artifactManager.RegisterForShutdown(applicationLifetime);
+    }
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+        _artifactManager.Dispose();
     }
 
     private async Task<string> WriteSolutionCoreAsync(
         IReadOnlyList<string> projectPaths,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
         var solution = new SolutionModel();
@@ -100,36 +129,10 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource
         hash.Append(solutionBytes);
         var hashString = Convert.ToHexString(hash.GetCurrentHash())[..12].ToLowerInvariant();
 
-        Directory.CreateDirectory(SolutionDirectory);
-        var solutionPath = Path.Combine(SolutionDirectory, $"projects.{hashString}.slnx");
-        if (File.Exists(solutionPath))
-        {
-            return solutionPath;
-        }
-
-        // Multiple isolated AppHost instances can share this directory. Write to a unique file on the
-        // same volume, then move it atomically so no build can observe a partially-written solution.
-        var temporaryPath = Path.Combine(SolutionDirectory, $".{Path.GetRandomFileName()}.tmp");
-        try
-        {
-            await File.WriteAllBytesAsync(temporaryPath, solutionBytes, cancellationToken).ConfigureAwait(false);
-            try
-            {
-                File.Move(temporaryPath, solutionPath);
-            }
-            catch (IOException) when (File.Exists(solutionPath))
-            {
-                // Another AppHost instance published the same content first.
-            }
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-
-        return solutionPath;
+        return await _artifactManager.PublishAndLeaseAsync(
+            hashString,
+            solutionBytes,
+            logger,
+            cancellationToken).ConfigureAwait(false);
     }
 }

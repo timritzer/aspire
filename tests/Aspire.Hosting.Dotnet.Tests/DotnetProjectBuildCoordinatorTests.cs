@@ -10,6 +10,7 @@ using Aspire.Hosting.Utils;
 using Aspire.TestUtilities;
 using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 
 namespace Aspire.Hosting.Dotnet.Tests;
@@ -33,7 +34,8 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             new ProjectResourceOptions { ExcludeLaunchProfile = true });
 
         var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
-        Assert.Equal([apiPath, workerPath], buildResource.ProjectPaths);
+        using var buildResourceScope = buildResource;
+        Assert.Equal([NormalizeProjectPath(apiPath), NormalizeProjectPath(workerPath)], buildResource.ProjectPaths);
         AssertBuildDependency(api.Resource, buildResource);
         AssertBuildDependency(worker.Resource, buildResource);
         Assert.Empty(buildResource.Annotations.OfType<ExplicitStartupAnnotation>());
@@ -113,7 +115,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         }
 
         var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
-        Assert.Equal([projectPath], buildResource.ProjectPaths);
+        Assert.Equal([NormalizeProjectPath(projectPath)], buildResource.ProjectPaths);
         AssertBuildDependency(project.Resource, buildResource);
         AssertBuildDependency(file.Resource, buildResource);
 
@@ -137,7 +139,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var second = builder.AddDotnetProject("api-copy", projectPath, options => options.ExcludeLaunchProfile = true);
 
         var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
-        Assert.Equal([projectPath], buildResource.ProjectPaths);
+        Assert.Equal([NormalizeProjectPath(projectPath)], buildResource.ProjectPaths);
         AssertBuildDependency(first.Resource, buildResource);
         AssertBuildDependency(second.Resource, buildResource);
     }
@@ -168,8 +170,9 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         builder.AddDotnetProject("second", secondProject, options => options.ExcludeLaunchProfile = true);
         builder.AddDotnetProject("first-copy", firstProject, options => options.ExcludeLaunchProfile = true);
         var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        using var buildResourceScope = buildResource;
 
-        var solutionPath = await buildResource.WriteSolutionAsync(TestContext.Current.CancellationToken);
+        var solutionPath = await buildResource.WriteSolutionAsync(NullLogger.Instance, TestContext.Current.CancellationToken);
 
         var solution = await SolutionSerializers.SlnXml.OpenAsync(
             solutionPath,
@@ -199,8 +202,9 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var projectPath = CreateProject(workspace.Path, "Api", "Api.csproj");
         builder.AddDotnetProject("api", projectPath, options => options.ExcludeLaunchProfile = true);
         var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        using var buildResourceScope = buildResource;
 
-        var solutionPath = await buildResource.WriteSolutionAsync(TestContext.Current.CancellationToken);
+        var solutionPath = await buildResource.WriteSolutionAsync(NullLogger.Instance, TestContext.Current.CancellationToken);
 
         Assert.Equal(Path.Combine(workspace.Path, ".aspire", "build"), buildResource.SolutionDirectory);
         Assert.StartsWith(buildResource.SolutionDirectory, solutionPath, StringComparison.Ordinal);
@@ -211,9 +215,10 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     public void CaseVariantProjectPathsFollowFilesystemIdentity()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var buildResource = new DotnetProjectBuildResource(
+        using var buildResource = new DotnetProjectBuildResource(
             DotnetProjectBuildCoordinator.BuildResourceName,
-            workspace.Path);
+            workspace.Path,
+            TimeProvider.System);
         var firstPath = CreateProject(workspace.Path, "Service", "App.csproj");
         var caseVariantPath = Path.Combine(workspace.Path, "service", "app.CSPROJ");
 
@@ -222,31 +227,75 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         if (File.Exists(caseVariantPath))
         {
             buildResource.AddProject(caseVariantPath);
-            Assert.Equal([firstPath], buildResource.ProjectPaths);
+            Assert.Equal([NormalizeProjectPath(firstPath)], buildResource.ProjectPaths);
         }
         else
         {
             var secondPath = CreateProject(workspace.Path, "service", "app.CSPROJ");
             buildResource.AddProject(secondPath);
-            Assert.Equal([firstPath, secondPath], buildResource.ProjectPaths);
+            Assert.Equal([NormalizeProjectPath(firstPath), NormalizeProjectPath(secondPath)], buildResource.ProjectPaths);
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SymlinkedProjectPathsFollowFilesystemIdentity(bool addAliasFirst)
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Service", "App.csproj");
+        var linkDirectory = Path.Combine(workspace.Path, "ServiceAlias");
+
+        try
+        {
+            Directory.CreateSymbolicLink(linkDirectory, Path.GetDirectoryName(projectPath)!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"Cannot create symbolic links in this environment: {ex.Message}");
+        }
+
+        var aliasPath = Path.Combine(linkDirectory, Path.GetFileName(projectPath));
+        var firstPath = addAliasFirst ? aliasPath : projectPath;
+        var secondPath = addAliasFirst ? projectPath : aliasPath;
+        var first = builder.AddDotnetProject("first", firstPath, options => options.ExcludeLaunchProfile = true);
+        var second = builder.AddDotnetProject("second", secondPath, options => options.ExcludeLaunchProfile = true);
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        using var buildResourceScope = buildResource;
+        var coordinatedProjectPath = NormalizeProjectPath(firstPath);
+
+        Assert.Equal([coordinatedProjectPath], buildResource.ProjectPaths);
+        Assert.Equal(
+            coordinatedProjectPath,
+            Assert.Single(first.Resource.Annotations.OfType<DotnetProjectMetadata>()).ProjectPath);
+        Assert.Equal(
+            coordinatedProjectPath,
+            Assert.Single(second.Resource.Annotations.OfType<DotnetProjectMetadata>()).ProjectPath);
+        Assert.Equal(Path.GetDirectoryName(coordinatedProjectPath), first.Resource.WorkingDirectory);
+        Assert.Equal(Path.GetDirectoryName(coordinatedProjectPath), second.Resource.WorkingDirectory);
+        Assert.Equal(coordinatedProjectPath, (await ArgumentEvaluator.GetArgumentListAsync(first.Resource))[2]);
+        Assert.Equal(coordinatedProjectPath, (await ArgumentEvaluator.GetArgumentListAsync(second.Resource))[2]);
     }
 
     [Fact]
     public async Task CanceledSolutionGenerationCanBeRetried()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var buildResource = new DotnetProjectBuildResource(
+        using var buildResource = new DotnetProjectBuildResource(
             DotnetProjectBuildCoordinator.BuildResourceName,
-            workspace.Path);
+            workspace.Path,
+            TimeProvider.System);
         buildResource.AddProject(CreateProject(workspace.Path, "Api", "Api.csproj"));
         using var canceledCts = new CancellationTokenSource();
         canceledCts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => buildResource.WriteSolutionAsync(canceledCts.Token));
+            () => buildResource.WriteSolutionAsync(NullLogger.Instance, canceledCts.Token));
 
-        var solutionPath = await buildResource.WriteSolutionAsync(TestContext.Current.CancellationToken);
+        var solutionPath = await buildResource.WriteSolutionAsync(NullLogger.Instance, TestContext.Current.CancellationToken);
         Assert.True(File.Exists(solutionPath));
     }
 
@@ -470,6 +519,9 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
 
     private static string NormalizeSolutionPath(string path) =>
         path.Replace(Path.DirectorySeparatorChar, '/');
+
+    private static string NormalizeProjectPath(string path) =>
+        Path.GetFullPath(path);
 
     private static async Task<IReadOnlyList<LogLine>> ReadLogsAsync(
         ResourceLoggerService loggerService,

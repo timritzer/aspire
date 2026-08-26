@@ -21,4 +21,13 @@ internal sealed class DotnetProjectMetadata(string projectPath, string? buildCon
     public string? BuildConfiguration { get; } = buildConfiguration;
 
     public bool SuppressBuild { get; set; }
+
+    /// <summary>
+    /// Uses the exact path selected by the coordinated build for subsequent process and IDE launches.
+    /// </summary>
+    internal void SetProjectPath(string coordinatedProjectPath)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(coordinatedProjectPath);
+        _resolvedProjectPath = coordinatedProjectPath;
+    }
 }

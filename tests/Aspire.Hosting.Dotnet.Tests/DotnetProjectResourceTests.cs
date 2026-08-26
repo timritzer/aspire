@@ -467,6 +467,29 @@ public class DotnetProjectResourceTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task AddDotnetProject_RebuilderUsesReleaseAppHostConfiguration()
+    {
+        var releaseAssembly = typeof(object).Assembly;
+        Assert.Equal("Release", releaseAssembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration);
+
+        using var builder = TestDistributedApplicationBuilder.Create(options => options.AssemblyName = releaseAssembly.FullName);
+        var projectPath = Path.Combine(builder.AppHostDirectory, "MyService", "MyService.csproj");
+        builder.AddDotnetProject("svc", projectPath, options => options.ExcludeLaunchProfile = true);
+
+        var rebuilder = Assert.Single(builder.Resources.OfType<ProjectRebuilderResource>());
+        var args = await ArgumentEvaluator.GetArgumentListAsync(rebuilder);
+
+        Assert.Equal(
+            [
+                "build",
+                projectPath,
+                "--configuration",
+                "Release"
+            ],
+            args);
+    }
+
+    [Fact]
     public async Task AddDotnetProject_MaterializesEndpointsFromLaunchProfile()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
