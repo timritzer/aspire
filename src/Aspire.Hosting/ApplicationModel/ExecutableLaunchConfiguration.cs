@@ -99,7 +99,9 @@ public class ExecutableLaunchConfiguration(string type)
 /// The launch configuration used for .NET projects and file-based C# apps.
 /// </summary>
 /// <remarks>
-/// The IDE builds and launches the project itself. The resource must carry <see cref="IProjectMetadata"/>.
+/// By default, the IDE builds and launches the project itself. When <see cref="SuppressBuild"/> is
+/// <see langword="true"/>, the IDE launches output produced by an external or coordinated build.
+/// The resource must carry <see cref="IProjectMetadata"/>.
 /// </remarks>
 [Experimental("ASPIREEXTENSION001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
 public sealed class ProjectLaunchConfiguration() : ExecutableLaunchConfiguration(KnownLaunchConfigurationTypes.Project)

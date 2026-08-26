@@ -94,9 +94,9 @@ public class HeldFileLeaseTests(ITestOutputHelper outputHelper)
     [Fact]
     public void Probe_ReturnsUnknownWhenLeaseDirectoryCannotBeEnumerated()
     {
-        if (OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows() || Environment.IsPrivilegedProcess)
         {
-            Assert.Skip("Unix file modes are required to create a deterministic unreadable directory.");
+            Assert.Skip("Requires a non-privileged process on a platform with Unix file modes.");
             return;
         }
 

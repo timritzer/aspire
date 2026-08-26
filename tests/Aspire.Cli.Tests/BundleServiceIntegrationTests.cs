@@ -326,9 +326,9 @@ public class BundleServiceIntegrationTests(ITestOutputHelper outputHelper)
     [Fact]
     public void TryCleanupStaleVersions_LeavesVersionWhenLeaseDirectoryCannotBeEnumerated()
     {
-        if (OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows() || Environment.IsPrivilegedProcess)
         {
-            Assert.Skip("Unix file modes are required to create a deterministic unreadable directory.");
+            Assert.Skip("Requires a non-privileged process on a platform with Unix file modes.");
             return;
         }
 

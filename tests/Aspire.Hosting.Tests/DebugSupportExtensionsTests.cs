@@ -110,7 +110,7 @@ public class DebugSupportExtensionsTests
         Assert.Equal(
             builder.AppHostAssembly?.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration,
             launchConfiguration.BuildConfiguration);
-        Assert.True(launchConfiguration.SuppressBuild);
+        Assert.False(launchConfiguration.SuppressBuild);
     }
 
     [Fact]

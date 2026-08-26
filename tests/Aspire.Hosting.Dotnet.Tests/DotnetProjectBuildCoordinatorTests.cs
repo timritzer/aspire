@@ -5,6 +5,7 @@
 
 using System.Reflection;
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Tests.Dcp;
 using Aspire.Hosting.Tests.Utils;
 using Aspire.Hosting.Utils;
 using Aspire.TestUtilities;
@@ -56,6 +57,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         Assert.True(File.Exists(solutionPath));
 
         var expected = new List<string> { "build", solutionPath };
+        AddExpectedDirectProjectSolutionIdentity(expected);
         AddExpectedConfiguration(builder, expected);
         Assert.Equal(expected, args);
     }
@@ -428,6 +430,97 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         await app.StopAsync(stopCts.Token);
     }
 
+    [Fact]
+    [RequiresTools(["dotnet"])]
+    public async Task FailedBuildPreventsForceStartedFileAppFromStarting()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var releaseBuild = Path.Combine(workspace.Path, "release-build");
+        var brokenProject = CreateGatedBrokenProject(workspace.Path, releaseBuild);
+        var fileApp = Path.Combine(workspace.Path, "worker.cs");
+        var sentinel = Path.Combine(workspace.Path, "worker-ran.txt");
+        File.WriteAllText(fileApp, """
+            #!/usr/bin/env dotnet
+
+            System.IO.File.WriteAllText(
+                System.Environment.GetEnvironmentVariable("SENTINEL_PATH")!,
+                "started");
+            """);
+
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper).WithResourceCleanUp(true);
+        builder.AddDotnetProject("broken", brokenProject, options => options.ExcludeLaunchProfile = true);
+        var worker = builder.AddDotnetProject("worker", fileApp, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("SENTINEL_PATH", sentinel);
+
+        await using var app = builder.Build();
+
+        using var startingCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);
+        var workerStartingTask = app.ResourceNotifications.WaitForResourceAsync(
+            "worker",
+            resourceEvent => resourceEvent.Snapshot.State?.Text == KnownResourceStates.Starting,
+            startingCts.Token);
+
+        using var startCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);
+        var startTask = app.StartAsync(startCts.Token);
+        var workerStartingEvent = await workerStartingTask;
+
+        // The coordinator callback is intentionally registered in addition to the normal wait edge.
+        // Put the instance in the state that the Start command force-releases so this test exercises
+        // the callback even when the ordinary dependency wait is bypassed.
+        await app.ResourceNotifications.PublishUpdateAsync(
+            worker.Resource,
+            workerStartingEvent.ResourceId,
+            snapshot => snapshot with { State = KnownResourceStates.Waiting });
+
+        using (var forceStartCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        using (var forcedStartingCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            var orchestrator = app.Services.GetRequiredService<ApplicationOrchestratorProxy>();
+            var forcedStartingTask = app.ResourceNotifications.WaitForResourceAsync(
+                "worker",
+                resourceEvent => resourceEvent.Snapshot.State?.Text == KnownResourceStates.Starting,
+                forcedStartingCts.Token);
+            var forceStartTask = orchestrator.StartResourceAsync(workerStartingEvent.ResourceId, forceStartCts.Token);
+            try
+            {
+                await forcedStartingTask;
+            }
+            finally
+            {
+                File.WriteAllText(releaseBuild, string.Empty);
+            }
+
+            await forceStartTask;
+        }
+
+        await startTask;
+
+        using (var buildCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            var buildEvent = await app.ResourceNotifications.WaitForResourceAsync(
+                DotnetProjectBuildCoordinator.BuildResourceName,
+                resourceEvent => DotnetProjectBuildCoordinator.IsSettledBuildSnapshot(resourceEvent.Snapshot),
+                buildCts.Token);
+            Assert.NotEqual(0, buildEvent.Snapshot.ExitCode);
+        }
+
+        using (var failureCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            var workerEvent = await app.ResourceNotifications.WaitForResourceAsync(
+                "worker",
+                resourceEvent => resourceEvent.Snapshot.State?.Text == KnownResourceStates.FailedToStart,
+                failureCts.Token);
+            Assert.Equal(KnownResourceStates.FailedToStart, workerEvent.Snapshot.State?.Text);
+        }
+
+        Assert.False(File.Exists(sentinel));
+
+        using var stopCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);
+        await app.StopAsync(stopCts.Token);
+    }
+
     private static string CreateProject(string root, string directoryName, string projectFileName)
     {
         var directory = Directory.CreateDirectory(Path.Combine(root, directoryName));
@@ -443,6 +536,13 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
               <PropertyGroup>
                 <TargetFramework>net8.0</TargetFramework>
               </PropertyGroup>
+              <Target Name="ValidateSolutionIdentity" BeforeTargets="CoreCompile">
+                <Error Condition="'$(SolutionDir)' != '*Undefined*'" Text="SolutionDir must match a direct project build." />
+                <Error Condition="'$(SolutionExt)' != '*Undefined*'" Text="SolutionExt must match a direct project build." />
+                <Error Condition="'$(SolutionFileName)' != '*Undefined*'" Text="SolutionFileName must match a direct project build." />
+                <Error Condition="'$(SolutionName)' != '*Undefined*'" Text="SolutionName must match a direct project build." />
+                <Error Condition="'$(SolutionPath)' != '*Undefined*'" Text="SolutionPath must match a direct project build." />
+              </Target>
               <Target Name="RecordBuild" BeforeTargets="CoreCompile">
                 <WriteLinesToFile File="$(MSBuildProjectDirectory)/build-count.txt" Lines="build" Overwrite="false" />
               </Target>
@@ -489,6 +589,32 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         return projectPath;
     }
 
+    private static string CreateGatedBrokenProject(string root, string releaseBuild)
+    {
+        var projectPath = CreateProjectFile(root, "Broken", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+              </PropertyGroup>
+              <Target Name="WaitThenFailBuild" BeforeTargets="CoreCompile">
+                <Exec Command="dotnet run --file &quot;$(MSBuildProjectDirectory)/BuildGate.cs&quot; --no-cache --no-launch-profile" />
+              </Target>
+            </Project>
+            """);
+        var releaseBuildBase64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(releaseBuild));
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(projectPath)!, "BuildGate.cs"), $$"""
+            var releaseBuild = System.Text.Encoding.UTF8.GetString(
+                System.Convert.FromBase64String("{{releaseBuildBase64}}"));
+            while (!System.IO.File.Exists(releaseBuild))
+            {
+                await System.Threading.Tasks.Task.Delay(10);
+            }
+
+            return 1;
+            """);
+        return projectPath;
+    }
+
     private static string CreateBrokenProject(string root, string buildLogMarker)
     {
         var projectPath = CreateProjectFile(root, "Broken", $$"""
@@ -522,6 +648,18 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
 
     private static string NormalizeProjectPath(string path) =>
         Path.GetFullPath(path);
+
+    private static void AddExpectedDirectProjectSolutionIdentity(List<string> expected)
+    {
+        expected.AddRange(
+        [
+            "-p:SolutionDir=*Undefined*",
+            "-p:SolutionExt=*Undefined*",
+            "-p:SolutionFileName=*Undefined*",
+            "-p:SolutionName=*Undefined*",
+            "-p:SolutionPath=*Undefined*"
+        ]);
+    }
 
     private static async Task<IReadOnlyList<LogLine>> ReadLogsAsync(
         ResourceLoggerService loggerService,

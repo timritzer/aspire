@@ -31,7 +31,7 @@ internal static class ProjectLaunchConfigurationFactory
             ProjectPath = projectMetadata.ProjectPath,
             Mode = mode,
             BuildConfiguration = launchDefaults?.BuildConfiguration,
-            SuppressBuild = projectMetadata.SuppressBuild,
+            SuppressBuild = ShouldSuppressIdeBuild(resource, projectMetadata),
             // The launch profile selection lives on the resource rather than on the project metadata, so it
             // can only be resolved when the configuration is produced, not when debug support is registered.
             DisableLaunchProfile = resource.TryGetLastAnnotation<ExcludeLaunchProfileAnnotation>(out _)
@@ -44,5 +44,15 @@ internal static class ProjectLaunchConfigurationFactory
         }
 
         return projectLaunchConfiguration;
+    }
+
+    private static bool ShouldSuppressIdeBuild(IResource resource, IProjectMetadata projectMetadata)
+    {
+        // Generated metadata for classic ProjectResource instances has long used SuppressBuild=true to keep
+        // the DCP process path from rebuilding outputs already produced with the AppHost. The IDE contract
+        // historically still rebuilt missing output and honored force-build requests for those resources.
+        // Preserve that behavior while allowing Project v2 executable resources to delegate build ownership
+        // to their coordinated build.
+        return resource is not ProjectResource && projectMetadata.SuppressBuild;
     }
 }

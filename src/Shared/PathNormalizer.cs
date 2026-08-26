@@ -78,6 +78,23 @@ internal static class PathNormalizer
 
             foreach (var segment in segments)
             {
+                // The pattern overload lets the filesystem apply the common exact/platform-default casing
+                // filter instead of eagerly comparing every sibling. If it yields no unique result, fall back
+                // to a full comparison so case-insensitive volumes and case-sensitive directories with names
+                // that differ only by case retain the behavior below.
+                using (var filteredMatches = Directory.EnumerateFileSystemEntries(current, segment).GetEnumerator())
+                {
+                    if (filteredMatches.MoveNext())
+                    {
+                        var filteredMatch = filteredMatches.Current;
+                        if (!filteredMatches.MoveNext())
+                        {
+                            current = filteredMatch;
+                            continue;
+                        }
+                    }
+                }
+
                 string? exactMatch = null;
                 string? caseInsensitiveMatch = null;
                 var caseInsensitiveMatchIsAmbiguous = false;

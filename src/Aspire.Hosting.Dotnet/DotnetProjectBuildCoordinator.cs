@@ -18,6 +18,16 @@ internal static class DotnetProjectBuildCoordinator
     // DCP uses -1 while an executable's process exit code is not yet available. The constant is
     // internal to Aspire.Hosting, so keep the protocol value here until it is normalized at the boundary.
     private const int UnknownExitCode = -1;
+    private const string UndefinedSolutionPropertyValue = "*Undefined*";
+
+    private static readonly string[] s_solutionIdentityPropertyNames =
+    [
+        "SolutionDir",
+        "SolutionExt",
+        "SolutionFileName",
+        "SolutionName",
+        "SolutionPath"
+    ];
 
     internal const string BuildResourceName = "__dotnet-project-build";
 
@@ -86,6 +96,15 @@ internal static class DotnetProjectBuildCoordinator
 
                 context.Args.Add("build");
                 context.Args.Add(solutionPath);
+
+                // Building a solution normally injects its path and name into every project. The generated
+                // solution lives under .aspire/build and has a content-derived name, so exposing that identity
+                // would change project evaluation from the previous direct-project builds and from later
+                // per-project rebuilds. Restore the values MSBuild supplies for a direct project build.
+                foreach (var propertyName in s_solutionIdentityPropertyNames)
+                {
+                    context.Args.Add($"-p:{propertyName}={UndefinedSolutionPropertyValue}");
+                }
 
                 if (!string.IsNullOrEmpty(configuration))
                 {
