@@ -32,4 +32,5 @@
       <LogicalName>Aspire.Hosting.Resources.LaunchProfileStrings.resources</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
+
 </Project>
