@@ -69,6 +69,21 @@ internal static class PathNormalizer
 
             try
             {
+                // Let the filesystem handle the common exact/platform-default casing lookup. Fall back
+                // to comparing every sibling only when the pattern is missing or ambiguous.
+                using (var filteredMatches = Directory.EnumerateFileSystemEntries(current, segment).GetEnumerator())
+                {
+                    if (filteredMatches.MoveNext())
+                    {
+                        var filteredMatch = filteredMatches.Current;
+                        if (!filteredMatches.MoveNext())
+                        {
+                            current = filteredMatch;
+                            continue;
+                        }
+                    }
+                }
+
                 string? exactMatch = null;
                 string? caseInsensitiveMatch = null;
                 foreach (var entry in Directory.EnumerateFileSystemEntries(current))

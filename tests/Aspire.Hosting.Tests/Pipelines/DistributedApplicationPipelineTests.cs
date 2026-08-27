@@ -2248,6 +2248,30 @@ public class DistributedApplicationPipelineTests(ITestOutputHelper testOutputHel
     }
 
     [Fact]
+    public async Task ResolveStepsAsync_ConfiguresFreshFinalActionOnEveryResolution()
+    {
+        using var builder = CreatePipelineTestBuilder();
+        using var app = builder.Build();
+        var pipeline = new DistributedApplicationPipeline();
+        pipeline.AddPipelineConfiguration(context =>
+        {
+            context.Steps.Single(step => step.Name == WellKnownPipelineSteps.BeforeStart)
+                .SetFinalAction(_ => Task.CompletedTask);
+            return Task.CompletedTask;
+        });
+        var context = CreateDeployingContext(app);
+
+        var first = await pipeline.ResolveStepsAsync(context).DefaultTimeout();
+        var second = await pipeline.ResolveStepsAsync(context).DefaultTimeout();
+
+        var firstBeforeStart = first.Single(step => step.Name == WellKnownPipelineSteps.BeforeStart);
+        var secondBeforeStart = second.Single(step => step.Name == WellKnownPipelineSteps.BeforeStart);
+        Assert.NotSame(firstBeforeStart, secondBeforeStart);
+        Assert.NotNull(firstBeforeStart.FinalAction);
+        Assert.NotNull(secondBeforeStart.FinalAction);
+    }
+
+    [Fact]
     public async Task ResolveStepsAsync_NormalizesRequiredByToDependsOn()
     {
         using var builder = CreatePipelineTestBuilder();

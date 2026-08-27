@@ -19,9 +19,6 @@ namespace Aspire.Hosting.Dotnet;
 /// </summary>
 internal static class DotnetProjectBuildCoordinator
 {
-    // DCP uses -1 while an executable's process exit code is not yet available. The constant is
-    // internal to Aspire.Hosting, so keep the protocol value here until it is normalized at the boundary.
-    private const int UnknownExitCode = -1;
     private static readonly ConditionalWeakTable<IDistributedApplicationBuilder, CoordinatorState> s_states = new();
 
     internal const string BuildResourceName = "__dotnet-project-build";
@@ -119,7 +116,7 @@ internal static class DotnetProjectBuildCoordinator
         return buildResource;
     }
 
-    private static void AddBuildDependency(
+    private static Action? AddBuildDependency(
         IDistributedApplicationBuilder builder,
         DotnetProjectResource resource,
         DotnetProjectBuildResource buildResource)
@@ -128,24 +125,54 @@ internal static class DotnetProjectBuildCoordinator
             annotation => annotation.WaitType is WaitType.WaitForCompletion &&
                           ReferenceEquals(annotation.Resource, buildResource)))
         {
-            return;
+            return null;
         }
 
+        var existingAnnotations = resource.Annotations.ToHashSet(ReferenceEqualityComparer.Instance);
         builder.CreateResourceBuilder(resource)
-            .WaitForCompletion(builder.CreateResourceBuilder(buildResource))
-            .OnBeforeResourceStarted((_, @event, cancellationToken) =>
+            .WaitForCompletion(builder.CreateResourceBuilder(buildResource));
+        var addedAnnotations = resource.Annotations
+            .Where(annotation => !existingAnnotations.Contains(annotation))
+            .ToArray();
+        var subscription = builder.Eventing.Subscribe<BeforeResourceStartedEvent>(
+            resource,
+            (@event, cancellationToken) =>
                 WaitForSuccessfulBuildAsync(@event.Services, buildResource, cancellationToken));
+
+        return () =>
+        {
+            builder.Eventing.Unsubscribe(subscription);
+            foreach (var annotation in addedAnnotations)
+            {
+                resource.Annotations.Remove(annotation);
+            }
+        };
     }
 
-    private static void AddBuildDependency(
+    private static Action? AddBuildDependency(
         IDistributedApplicationBuilder builder,
         DotnetProjectBuildResource resource,
         DotnetProjectBuildResource dependency)
     {
+        var existingAnnotations = resource.Annotations.ToHashSet(ReferenceEqualityComparer.Instance);
         builder.CreateResourceBuilder(resource)
-            .WaitForCompletion(builder.CreateResourceBuilder(dependency))
-            .OnBeforeResourceStarted((_, @event, cancellationToken) =>
+            .WaitForCompletion(builder.CreateResourceBuilder(dependency));
+        var addedAnnotations = resource.Annotations
+            .Where(annotation => !existingAnnotations.Contains(annotation))
+            .ToArray();
+        var subscription = builder.Eventing.Subscribe<BeforeResourceStartedEvent>(
+            resource,
+            (@event, cancellationToken) =>
                 WaitForSuccessfulBuildAsync(@event.Services, dependency, cancellationToken));
+
+        return () =>
+        {
+            builder.Eventing.Unsubscribe(subscription);
+            foreach (var annotation in addedAnnotations)
+            {
+                resource.Annotations.Remove(annotation);
+            }
+        };
     }
 
     private static async Task WaitForSuccessfulBuildAsync(
@@ -171,7 +198,7 @@ internal static class DotnetProjectBuildCoordinator
     internal static bool IsSettledBuildSnapshot(CustomResourceSnapshot snapshot) =>
         snapshot.State?.Text == KnownResourceStates.FailedToStart ||
         (KnownResourceStates.TerminalStates.Contains(snapshot.State?.Text) &&
-         snapshot.ExitCode is not null and not UnknownExitCode);
+         snapshot.ExitCode is not null);
 
     private static bool IsProjectFile(string path) =>
         path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase);
@@ -246,7 +273,6 @@ internal static class DotnetProjectBuildCoordinator
                 return Task.CompletedTask;
             }
 
-            _materialized = true;
             var projectEntries = _registrations
                 .Select(registration => new ProjectEntry(
                     registration,
@@ -255,49 +281,105 @@ internal static class DotnetProjectBuildCoordinator
                 .ToArray();
             if (projectEntries.Length == 0)
             {
+                _materialized = true;
                 return Task.CompletedTask;
             }
 
             var buildSteps = CreateBuildSteps(projectEntries);
-            var buildResources = new List<DotnetProjectBuildResource>(buildSteps.Count);
-            for (var index = 0; index < buildSteps.Count; index++)
+            var applicationLifetime = services.GetRequiredService<IHostApplicationLifetime>();
+            var primaryBuildResource = PrimaryBuildResource!;
+            var originalPrimaryProjectPaths = primaryBuildResource.ProjectPaths;
+            var originalPrimaryWorkingDirectory = primaryBuildResource.WorkingDirectory;
+            var rollbackActions = new Stack<Action>();
+
+            try
             {
-                var step = buildSteps[index];
-                var buildResource = index == 0
-                    ? PrimaryBuildResource!
-                    : CreateBuildResource(step.Configuration, index + 1);
+                rollbackActions.Push(() =>
+                    primaryBuildResource.ConfigureTraversalBuild(
+                        originalPrimaryProjectPaths,
+                        originalPrimaryWorkingDirectory));
 
-                if (step.IsTraversal)
+                var buildResources = new List<DotnetProjectBuildResource>(buildSteps.Count);
+                for (var index = 0; index < buildSteps.Count; index++)
                 {
-                    buildResource.ConfigureTraversalBuild(
-                        step.Projects.Select(entry => entry.Metadata.ProjectPath),
-                        step.WorkingDirectory);
-                }
-                else
-                {
-                    var entry = step.Projects.Single();
-                    buildResource.ConfigureDirectBuild(entry.Metadata.ProjectPath, step.WorkingDirectory);
-                    CopyProjectEnvironment(entry.Registration.Resource, buildResource);
+                    var step = buildSteps[index];
+                    var buildResource = index == 0
+                        ? primaryBuildResource
+                        : CreateBuildResource(step.Configuration, index + 1);
+
+                    if (index > 0)
+                    {
+                        rollbackActions.Push(() =>
+                        {
+                            _builder.Resources.Remove(buildResource);
+                            _ownedBuildResources.Remove(buildResource);
+                            buildResource.Dispose();
+                        });
+                    }
+
+                    if (step.IsTraversal)
+                    {
+                        buildResource.ConfigureTraversalBuild(
+                            step.Projects.Select(entry => entry.Metadata.ProjectPath),
+                            step.WorkingDirectory);
+                    }
+                    else
+                    {
+                        var entry = step.Projects.Single();
+                        buildResource.ConfigureDirectBuild(entry.Metadata.ProjectPath, step.WorkingDirectory);
+                        var environmentAnnotation = CopyProjectEnvironment(entry.Registration.Resource, buildResource);
+                        rollbackActions.Push(() => buildResource.Annotations.Remove(environmentAnnotation));
+                    }
+
+                    buildResource.RegisterForShutdown(applicationLifetime);
+                    buildResources.Add(buildResource);
                 }
 
-                buildResource.RegisterForShutdown(services.GetRequiredService<IHostApplicationLifetime>());
-                buildResources.Add(buildResource);
+                for (var index = 1; index < buildResources.Count; index++)
+                {
+                    if (AddBuildDependency(_builder, buildResources[index], buildResources[index - 1]) is { } rollback)
+                    {
+                        rollbackActions.Push(rollback);
+                    }
+                }
+
+                var finalBuildResource = buildResources[^1];
+                foreach (var registration in _registrations)
+                {
+                    var resource = registration.Resource;
+                    if (resource.Annotations.OfType<DotnetProjectMetadata>().SingleOrDefault() is { } metadata &&
+                        IsSupportedPath(metadata.ProjectPath) &&
+                        AddBuildDependency(_builder, resource, finalBuildResource) is { } rollback)
+                    {
+                        rollbackActions.Push(rollback);
+                    }
+                }
+
+                _materialized = true;
             }
-
-            for (var index = 1; index < buildResources.Count; index++)
+            catch (Exception materializationException)
             {
-                AddBuildDependency(_builder, buildResources[index], buildResources[index - 1]);
-            }
-
-            var finalBuildResource = buildResources[^1];
-            foreach (var registration in _registrations)
-            {
-                var resource = registration.Resource;
-                if (resource.Annotations.OfType<DotnetProjectMetadata>().SingleOrDefault() is { } metadata &&
-                    IsSupportedPath(metadata.ProjectPath))
+                var rollbackExceptions = new List<Exception>();
+                while (rollbackActions.TryPop(out var rollback))
                 {
-                    AddBuildDependency(_builder, resource, finalBuildResource);
+                    try
+                    {
+                        rollback();
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        rollbackExceptions.Add(rollbackException);
+                    }
                 }
+
+                if (rollbackExceptions.Count > 0)
+                {
+                    throw new AggregateException(
+                        "Coordinated .NET project build-plan materialization failed and could not be fully rolled back.",
+                        [materializationException, .. rollbackExceptions]);
+                }
+
+                throw;
             }
 
             return Task.CompletedTask;
@@ -365,11 +447,11 @@ internal static class DotnetProjectBuildCoordinator
             return buildResource;
         }
 
-        private static void CopyProjectEnvironment(
+        private static EnvironmentCallbackAnnotation CopyProjectEnvironment(
             DotnetProjectResource projectResource,
             DotnetProjectBuildResource buildResource)
         {
-            buildResource.Annotations.Add(new EnvironmentCallbackAnnotation(async context =>
+            var annotation = new EnvironmentCallbackAnnotation(async context =>
             {
                 var projectConfiguration = await ExecutionConfigurationBuilder
                     .Create(projectResource)
@@ -389,7 +471,9 @@ internal static class DotnetProjectBuildCoordinator
                 {
                     context.EnvironmentVariables[name] = value.Unprocessed;
                 }
-            }));
+            });
+            buildResource.Annotations.Add(annotation);
+            return annotation;
         }
 
         private static string? FindNearestGlobalJson(string workingDirectory)
@@ -420,7 +504,8 @@ internal static class DotnetProjectBuildCoordinator
             }
 
             return environmentCallbacks.Any(
-                callback => !entry.Registration.BaselineEnvironmentCallbacks.Contains(callback));
+                callback => callback is not RuntimeEnvironmentCallbackAnnotation &&
+                            !entry.Registration.BaselineEnvironmentCallbacks.Contains(callback));
         }
 
         private readonly record struct BuildContext(string? GlobalJsonPath, string? Configuration);

@@ -58,4 +58,54 @@ suite('Aspire coordinated build E2E', function () {
             fs.rmSync(projectDirectory, { recursive: true, force: true });
         }
     });
+
+    test('uses the requested file-app configuration instead of a source Configuration property', async () => {
+        await openAspireView();
+        await waitForRepositoryIdle();
+
+        const projectDirectory = path.join(getWorkspaceRoot(), 'CoordinatedFileApp');
+        const projectPath = path.join(projectDirectory, 'app.cs');
+        fs.mkdirSync(projectDirectory, { recursive: true });
+
+        try {
+            writeFileWithRetry(projectPath, [
+                '// Licensed to the .NET Foundation under one or more agreements.',
+                '// The .NET Foundation licenses this file to you under the MIT license.',
+                '',
+                '#:property Configuration=Release',
+                'System.Console.WriteLine("coordinated file app");',
+                ''
+            ].join('\n'));
+            execFileSync('dotnet', ['build', projectPath, '--configuration', 'Debug', '--nologo'], {
+                cwd: projectDirectory,
+                stdio: 'pipe',
+            });
+
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: projectPath,
+                build_configuration: 'Debug',
+                suppress_build: true,
+            };
+            const controlStatus = await executeE2eControlCommand({
+                name: 'createResourceDebugConfiguration',
+                launchConfig,
+                debug: false,
+                isApphost: true,
+            }, { timeoutMs: 180000 });
+            const debugConfiguration = controlStatus.result as { program?: string };
+
+            assert.ok(debugConfiguration.program);
+            assert.ok(fs.existsSync(debugConfiguration.program), `Expected configured file-app output to exist: ${debugConfiguration.program}`);
+            const outputPathSegments = debugConfiguration.program.split(/[\\/]/).map(segment => segment.toLowerCase());
+            assert.ok(
+                outputPathSegments.includes('debug'),
+                `Expected Debug output, got: ${debugConfiguration.program}`);
+            assert.ok(
+                !outputPathSegments.includes('release'),
+                `Expected the source Configuration property to be overridden, got: ${debugConfiguration.program}`);
+        } finally {
+            fs.rmSync(projectDirectory, { recursive: true, force: true });
+        }
+    });
 });

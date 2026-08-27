@@ -55,9 +55,10 @@ await builder.build().run();
 ```
 
 Before resources start, Aspire collects projects with compatible SDK and environment contexts into
-generated AppHost-local MSBuild traversal projects and builds each group in parallel. Projects with
-project-specific build environments use serialized direct builds instead. Each project is then launched
-with `dotnet run --project <path> --no-build`. File-based apps compile separately with
+generated AppHost-local MSBuild traversal projects. Build groups run serially, while projects within
+each traversal group can build in parallel. Projects with project-specific build environments use
+serialized direct builds instead. Each project is then launched with
+`dotnet run --project <path> --no-build`. File-based apps compile separately with
 `dotnet run --file <path> --no-cache`, but wait for every coordinated project build in mixed
 applications so shared project references don't race.
 

@@ -306,6 +306,52 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task ProjectsWithServiceDiscoveryReferenceShareTraversalBuild()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var apiPath = CreateProject(workspace.Path, "Api", "Api.csproj");
+        var workerPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var api = builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true)
+            .WithHttpEndpoint();
+        builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
+            .WithReference(api);
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal(
+            [NormalizeProjectPath(apiPath), NormalizeProjectPath(workerPath)],
+            buildResource.ProjectPaths);
+    }
+
+    [Fact]
+    public async Task ProjectsWithConnectionStringReferenceShareTraversalBuild()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var apiPath = CreateProject(workspace.Path, "Api", "Api.csproj");
+        var workerPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var connectionString = builder.AddConnectionString("database");
+        builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true);
+        builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
+            .WithReference(connectionString);
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal(
+            [NormalizeProjectPath(apiPath), NormalizeProjectPath(workerPath)],
+            buildResource.ProjectPaths);
+    }
+
+    [Fact]
     public async Task ProjectsWithDifferentGlobalJsonRootsUseSerializedTraversalBuilds()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
@@ -535,12 +581,56 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             .WithEnvironment("BUILD_FLAVOR", "custom");
         await using var app = builder.Build();
 
-        var exception = await Assert.ThrowsAsync<DistributedApplicationException>(
+        var firstException = await Assert.ThrowsAsync<DistributedApplicationException>(
+            () => PublishBeforeStartAsync(builder, app));
+        var secondException = await Assert.ThrowsAsync<DistributedApplicationException>(
             () => PublishBeforeStartAsync(builder, app));
 
-        Assert.Contains("registered multiple times", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("'service'", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("'service-copy'", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(firstException.Message, secondException.Message);
+        Assert.Contains("registered multiple times", firstException.Message, StringComparison.Ordinal);
+        Assert.Contains("'service'", firstException.Message, StringComparison.Ordinal);
+        Assert.Contains("'service-copy'", firstException.Message, StringComparison.Ordinal);
+        Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+    }
+
+    [Fact]
+    public async Task PartiallyMaterializedBuildPlanIsRolledBackBeforeRetry()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var firstPath = CreateProject(workspace.Path, "First", "First.csproj");
+        var secondPath = CreateProject(workspace.Path, "Second", "Second.csproj");
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(firstPath)!, "global.json"), """
+            {
+              "sdk": {
+                "version": "1.2.3",
+                "rollForward": "disable"
+              }
+            }
+            """);
+        builder.AddDotnetProject("first", firstPath, options => options.ExcludeLaunchProfile = true);
+        builder.AddDotnetProject("second", secondPath, options => options.ExcludeLaunchProfile = true);
+        var conflictingResource = new ParameterResource(
+            $"{DotnetProjectBuildCoordinator.BuildResourceName}-2",
+            _ => "conflict");
+        conflictingResource.Annotations.Add(NameValidationPolicyAnnotation.None);
+        builder.AddResource(conflictingResource);
+        var primaryBuildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        var originalProjectPaths = primaryBuildResource.ProjectPaths;
+        var originalWorkingDirectory = primaryBuildResource.WorkingDirectory;
+        await using var app = builder.Build();
+
+        var firstException = await Assert.ThrowsAsync<DistributedApplicationException>(
+            () => PublishBeforeStartAsync(builder, app));
+        var secondException = await Assert.ThrowsAsync<DistributedApplicationException>(
+            () => PublishBeforeStartAsync(builder, app));
+
+        Assert.Equal(firstException.Message, secondException.Message);
+        Assert.Equal(originalProjectPaths, primaryBuildResource.ProjectPaths);
+        Assert.Equal(originalWorkingDirectory, primaryBuildResource.WorkingDirectory);
+        Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
     }
 
     [Theory]
@@ -607,7 +697,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
 
     [Theory]
     [InlineData(nameof(KnownResourceStates.Finished), null, false)]
-    [InlineData(nameof(KnownResourceStates.Finished), -1, false)]
+    [InlineData(nameof(KnownResourceStates.Finished), -1, true)]
     [InlineData(nameof(KnownResourceStates.Finished), 0, true)]
     [InlineData(nameof(KnownResourceStates.Finished), 1, true)]
     [InlineData(nameof(KnownResourceStates.FailedToStart), null, true)]

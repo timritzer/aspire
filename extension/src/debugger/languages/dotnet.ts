@@ -37,7 +37,13 @@ interface IDotNetService {
     getAndActivateDevKit(): Promise<boolean>
     buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void>;
     getDotNetTargetPath(projectFile: string, buildConfiguration?: string): Promise<string>;
-    getDotNetRunApiOutput(projectFile: string, environment?: NodeJS.ProcessEnv, buildConfiguration?: string): Promise<string>;
+    getDotNetRunApiOutput(projectFile: string, environment?: NodeJS.ProcessEnv): Promise<string>;
+    getDotNetFileAppRunProperties(projectFile: string, buildConfiguration: string, environment?: NodeJS.ProcessEnv): Promise<DotNetFileAppRunProperties>;
+}
+
+interface DotNetFileAppRunProperties {
+    runCommand: string;
+    runArguments: string;
 }
 
 export class DotNetService implements IDotNetService {
@@ -157,7 +163,64 @@ export class DotNetService implements IDotNetService {
         }
     }
 
-    async getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv, buildConfiguration?: string): Promise<string> {
+    async getDotNetFileAppRunProperties(projectFile: string, buildConfiguration: string, environment?: NodeJS.ProcessEnv): Promise<DotNetFileAppRunProperties> {
+        const args = [
+            'build',
+            projectFile,
+            '--configuration',
+            buildConfiguration,
+            '--nologo',
+            '--verbosity',
+            'quiet',
+            '-getProperty:RunCommand,RunArguments'
+        ];
+
+        let stdout: string;
+        try {
+            const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectFile)));
+            const propertyEnvironment = { ...process.env, ...environment };
+            ({ stdout } = await this.execFileAsync('dotnet', args, {
+                cwd: path.dirname(projectFile),
+                encoding: 'utf8',
+                env: createResolvedAspireCliPathProcessEnvironment(cliPath, propertyEnvironment)
+            }));
+        } catch (err) {
+            throw new Error(buildFailedForProjectWithError(projectFile, String(err)));
+        }
+
+        const output = stdout.trim();
+        if (!output) {
+            throw new Error(noOutputFromMsbuild);
+        }
+
+        // `dotnet build -getProperty:RunCommand,RunArguments` emits:
+        //   { "Properties": { "RunCommand": "/workspace/bin/Debug/app", "RunArguments": "" } }
+        // RunArguments may legitimately be empty, but both properties must be present as strings.
+        let parsed: {
+            Properties?: {
+                RunCommand?: unknown;
+                RunArguments?: unknown;
+            };
+        };
+        try {
+            parsed = JSON.parse(output);
+        } catch {
+            throw new Error(invalidLaunchConfiguration(projectFile));
+        }
+
+        if (typeof parsed.Properties?.RunCommand !== 'string'
+            || !parsed.Properties.RunCommand
+            || typeof parsed.Properties.RunArguments !== 'string') {
+            throw new Error(invalidLaunchConfiguration(projectFile));
+        }
+
+        return {
+            runCommand: parsed.Properties.RunCommand,
+            runArguments: parsed.Properties.RunArguments
+        };
+    }
+
+    async getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv): Promise<string> {
         const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectPath)));
         let childProcess: ChildProcessWithoutNullStreams | undefined;
 
@@ -171,11 +234,6 @@ export class DotNetService implements IDotNetService {
                 extensionLogOutputChannel.info('dotnet run-api - starting process');
 
                 const runApiEnvironment = { ...process.env, ...environment };
-                if (buildConfiguration) {
-                    // run-api has no command-line option for Configuration. MSBuild imports environment
-                    // variables as properties, so use the standard Configuration property for evaluation.
-                    setEnvironmentVariable(runApiEnvironment, 'Configuration', buildConfiguration);
-                }
 
                 childProcess = spawn('dotnet', ['run-api'], {
                     cwd: path.dirname(projectPath),
@@ -1024,17 +1082,22 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                     // The Aspire SDK run hook would rewrite an AppHost RunCommand to `aspire run`, but the CLI
                     // already owns this launch. Suppress the hook so run-api returns the generated executable.
                     const runApiEnvironment = launchOptions.isApphost ? { ASPIRE_SUPPRESS_CLI_RUN_HOOK: 'true' } : undefined;
-                    const runApiOutput = await dotNetService.getDotNetRunApiOutput(projectPath, runApiEnvironment, buildConfiguration);
+                    const runApiOutput = await dotNetService.getDotNetRunApiOutput(projectPath, runApiEnvironment);
                     const runApiConfig = getRunApiConfigFromOutput(runApiOutput);
+                    const configuredRunProperties = buildConfiguration
+                        ? await dotNetService.getDotNetFileAppRunProperties(projectPath, buildConfiguration, runApiEnvironment)
+                        : undefined;
 
                     if (shouldBuildProject) {
                         // There may be an older cached version of the file-based app, so force a build.
                         await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
                     }
 
-                    debugConfiguration.program = runApiConfig.executablePath;
+                    const executablePath = configuredRunProperties?.runCommand ?? runApiConfig.executablePath;
+                    const commandLineArguments = configuredRunProperties?.runArguments ?? runApiConfig.commandLineArguments;
+                    debugConfiguration.program = executablePath;
 
-                    const hostArguments = isDotnetLauncher(runApiConfig.executablePath) ? runApiConfig.commandLineArguments : undefined;
+                    const hostArguments = isDotnetLauncher(executablePath) ? commandLineArguments : undefined;
                     resolvedArguments = combineRunApiArguments(hostArguments, resolvedArguments);
                     debugConfiguration.args = resolvedArguments;
 

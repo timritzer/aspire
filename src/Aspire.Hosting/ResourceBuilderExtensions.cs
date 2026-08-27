@@ -388,6 +388,18 @@ public static class ResourceBuilderExtensions
         return builder.WithAnnotation(new EnvironmentCallbackAnnotation(callback));
     }
 
+    private static IResourceBuilder<T> WithRuntimeEnvironment<T>(this IResourceBuilder<T> builder, Action<EnvironmentCallbackContext> callback)
+        where T : IResourceWithEnvironment
+    {
+        return builder.WithAnnotation(new RuntimeEnvironmentCallbackAnnotation(callback));
+    }
+
+    private static IResourceBuilder<T> WithRuntimeEnvironment<T>(this IResourceBuilder<T> builder, Func<EnvironmentCallbackContext, Task> callback)
+        where T : IResourceWithEnvironment
+    {
+        return builder.WithAnnotation(new RuntimeEnvironmentCallbackAnnotation(callback));
+    }
+
     /// <summary>
     /// Adds an environment variable to the resource with the endpoint for <paramref name="endpointReference"/>.
     /// </summary>
@@ -1118,7 +1130,7 @@ public static class ResourceBuilderExtensions
         builder.Resource.TryGetLastAnnotation<ReferenceEnvironmentInjectionAnnotation>(out var injectionAnnotation);
         var flags = injectionAnnotation?.Flags ?? ReferenceEnvironmentInjectionFlags.All;
 
-        return builder.WithEnvironment(context =>
+        return builder.WithRuntimeEnvironment(context =>
         {
             if (flags.HasFlag(ReferenceEnvironmentInjectionFlags.ConnectionString))
             {
@@ -1281,12 +1293,14 @@ public static class ResourceBuilderExtensions
 
         if (flags.HasFlag(ReferenceEnvironmentInjectionFlags.ServiceDiscovery))
         {
-            builder.WithEnvironment($"services__{name}__default__0", uri.ToString());
+            builder.WithRuntimeEnvironment(context =>
+                context.EnvironmentVariables[$"services__{name}__default__0"] = uri.ToString());
         }
 
         if (flags.HasFlag(ReferenceEnvironmentInjectionFlags.Endpoints))
         {
-            builder.WithEnvironment(EnvironmentVariableNameEncoder.Encode(name), uri.ToString());
+            builder.WithRuntimeEnvironment(context =>
+                context.EnvironmentVariables[EnvironmentVariableNameEncoder.Encode(name)] = uri.ToString());
         }
 
         return builder;
@@ -1318,18 +1332,20 @@ public static class ResourceBuilderExtensions
             if (flags.HasFlag(ReferenceEnvironmentInjectionFlags.Endpoints))
             {
                 var encodedResourceName = EnvironmentVariableNameEncoder.Encode(externalService.Resource.Name);
-                builder.WithEnvironment(encodedResourceName.ToUpperInvariant(), uri.ToString());
+                builder.WithRuntimeEnvironment(context =>
+                    context.EnvironmentVariables[encodedResourceName.ToUpperInvariant()] = uri.ToString());
             }
 
             if (flags.HasFlag(ReferenceEnvironmentInjectionFlags.ServiceDiscovery))
             {
                 var envVarName = $"services__{externalService.Resource.Name}__{uri.Scheme}__0";
-                builder.WithEnvironment(envVarName, uri.ToString());
+                builder.WithRuntimeEnvironment(context =>
+                    context.EnvironmentVariables[envVarName] = uri.ToString());
             }
         }
         else if (externalService.Resource.UrlParameter is not null)
         {
-            builder.WithEnvironment(async context =>
+            builder.WithRuntimeEnvironment(async context =>
             {
                 string discoveryEnvVarName;
                 string endpointEnvVarName;
@@ -1409,7 +1425,7 @@ public static class ResourceBuilderExtensions
             builder.WithAnnotation(endpointReferenceAnnotation);
 
             var callback = CreateEndpointReferenceEnvironmentPopulationCallback(endpointReferenceAnnotation, null, name);
-            builder.WithEnvironment(callback);
+            builder.WithRuntimeEnvironment(callback);
         }
 
         // If no specific endpoint name is specified, go and add all the endpoints.

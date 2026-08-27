@@ -26,7 +26,9 @@ class TestDotNetService {
     // RunCommand payload; the default empty string mirrors the not-configured case.
     public runApiOutput: string = '';
     public runApiEnvironment: NodeJS.ProcessEnv | undefined;
-    public runApiBuildConfiguration: string | undefined;
+    public fileAppRunProperties = { runCommand: 'dotnet', runArguments: '' };
+    public fileAppRunBuildConfiguration: string | undefined;
+    public fileAppRunEnvironment: NodeJS.ProcessEnv | undefined;
 
     constructor(outputPath: string, rejectBuild: Error | null, hasDevKit: boolean) {
         this.getDotNetTargetPathStub = sinon.stub();
@@ -54,10 +56,15 @@ class TestDotNetService {
         return Promise.resolve(this._hasDevKit);
     }
 
-    getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv, buildConfiguration?: string): Promise<string> {
+    getDotNetRunApiOutput(projectPath: string, environment?: NodeJS.ProcessEnv): Promise<string> {
         this.runApiEnvironment = environment;
-        this.runApiBuildConfiguration = buildConfiguration;
         return Promise.resolve(this.runApiOutput);
+    }
+
+    getDotNetFileAppRunProperties(_projectPath: string, buildConfiguration: string, environment?: NodeJS.ProcessEnv): Promise<{ runCommand: string; runArguments: string }> {
+        this.fileAppRunBuildConfiguration = buildConfiguration;
+        this.fileAppRunEnvironment = environment;
+        return Promise.resolve(this.fileAppRunProperties);
     }
 }
 
@@ -518,7 +525,7 @@ suite('Dotnet Debugger Extension Tests', () => {
         assert.strictEqual(clock.countTimers(), 0);
     });
 
-    test('dotnet run-api supplies build configuration through the MSBuild environment', async () => {
+    test('dotnet run-api preserves the requested environment', async () => {
         sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
         const stdout = new PassThrough();
         const child = Object.assign(new EventEmitter(), {
@@ -533,17 +540,72 @@ suite('Dotnet Debugger Extension Tests', () => {
 
         const response = service.getDotNetRunApiOutput(
             '/workspace/app.cs',
-            { ASPIRE_SUPPRESS_CLI_RUN_HOOK: 'true' },
-            'Release');
+            { ASPIRE_SUPPRESS_CLI_RUN_HOOK: 'true' });
         await new Promise<void>(resolve => setImmediate(resolve));
         stdout.write('{"$type":"RunCommand"}\n');
         await response;
 
         assert.deepStrictEqual(spawnStub.firstCall.args[1], ['run-api']);
-        assert.strictEqual(spawnStub.firstCall.args[2]?.env?.Configuration, 'Release');
         assert.strictEqual(
             spawnStub.firstCall.args[2]?.env?.ASPIRE_SUPPRESS_CLI_RUN_HOOK,
             'true');
+    });
+
+    test('file-app run properties use build configuration as a global property and parse the machine-readable response', async () => {
+        const projectPath = nodePath.join(process.cwd(), '.test-temp', 'configured-file-app', 'app.cs');
+        const resolvedEnv = { MARKER: 'resolved-env' } as unknown as NodeJS.ProcessEnv;
+        sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+        const createResolvedEnvStub = sinon.stub(cliPathEnvironmentModule, 'createResolvedAspireCliPathProcessEnvironment').returns(resolvedEnv);
+        const execFileStub = sinon.stub(childProcess, 'execFile').yields(null, {
+            stdout: JSON.stringify({
+                Properties: {
+                    RunCommand: '/workspace/bin/Debug/app',
+                    RunArguments: 'exec "/workspace/bin/Debug/app.dll"'
+                }
+            }),
+            stderr: ''
+        });
+        const service = new DotNetService({} as AspireDebugSession);
+
+        const result = await service.getDotNetFileAppRunProperties(
+            projectPath,
+            'Debug',
+            { ASPIRE_SUPPRESS_CLI_RUN_HOOK: 'true' });
+
+        assert.deepStrictEqual(result, {
+            runCommand: '/workspace/bin/Debug/app',
+            runArguments: 'exec "/workspace/bin/Debug/app.dll"'
+        });
+        assert.deepStrictEqual(execFileStub.firstCall.args[1], [
+            'build',
+            projectPath,
+            '--configuration',
+            'Debug',
+            '--nologo',
+            '--verbosity',
+            'quiet',
+            '-getProperty:RunCommand,RunArguments'
+        ]);
+        assert.strictEqual(execFileStub.firstCall.args[2]?.cwd, nodePath.dirname(projectPath));
+        assert.strictEqual(execFileStub.firstCall.args[2]?.env, resolvedEnv);
+        assert.strictEqual(createResolvedEnvStub.firstCall.args[0], '/resolved/aspire');
+        assert.strictEqual(
+            createResolvedEnvStub.firstCall.args[1]?.ASPIRE_SUPPRESS_CLI_RUN_HOOK,
+            'true');
+    });
+
+    test('file-app run properties reject missing and malformed machine-readable responses', async () => {
+        sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+        const execFileStub = sinon.stub(childProcess, 'execFile');
+        execFileStub.onFirstCall().yields(null, {
+            stdout: JSON.stringify({ Properties: { RunCommand: '/workspace/bin/Debug/app' } }),
+            stderr: ''
+        });
+        execFileStub.onSecondCall().yields(null, { stdout: 'not-json', stderr: '' });
+        const service = new DotNetService({} as AspireDebugSession);
+
+        await assert.rejects(service.getDotNetFileAppRunProperties('/workspace/app.cs', 'Debug'));
+        await assert.rejects(service.getDotNetFileAppRunProperties('/workspace/app.cs', 'Debug'));
     });
 
     test('dotnet run-api does not time out or spawn while CLI resolution is pending', async () => {
@@ -1339,7 +1401,7 @@ suite('Dotnet Debugger Extension Tests', () => {
             createDebugConfig());
 
         assert.strictEqual(dotNetService.buildDotNetProjectStub.notCalled, true);
-        assert.strictEqual(dotNetService.runApiBuildConfiguration, 'Release');
+        assert.strictEqual(dotNetService.fileAppRunBuildConfiguration, 'Release');
 
         await extension.createDebugSessionConfigurationCallback!(
             launchConfig,
@@ -1380,10 +1442,15 @@ suite('Dotnet Debugger Extension Tests', () => {
             WorkingDirectory: '/tmp',
             EnvironmentVariables: {}
         });
+        dotNetService.fileAppRunProperties = {
+            runCommand: executablePath,
+            runArguments: ''
+        };
 
         const launchConfig: ProjectLaunchConfiguration = {
             type: 'project',
-            project_path: '/tmp/apphost.cs'
+            project_path: '/tmp/apphost.cs',
+            build_configuration: 'Debug'
         };
         const debugConfig: AspireResourceExtendedDebugConfiguration = {
             runId: '1',
@@ -1402,6 +1469,7 @@ suite('Dotnet Debugger Extension Tests', () => {
             debugConfig);
 
         assert.strictEqual(dotNetService.runApiEnvironment?.ASPIRE_SUPPRESS_CLI_RUN_HOOK, 'true');
+        assert.strictEqual(dotNetService.fileAppRunEnvironment?.ASPIRE_SUPPRESS_CLI_RUN_HOOK, 'true');
         assert.strictEqual(debugConfig.program, executablePath);
         assert.strictEqual(dotNetService.buildDotNetProjectStub.notCalled, true);
     });
@@ -1496,6 +1564,54 @@ suite('Dotnet Debugger Extension Tests', () => {
         // RUNAPI_ENV must not appear.
         assert.deepStrictEqual(debugConfig.env, {});
         assert.strictEqual(dotNetService.buildDotNetProjectStub.called, true);
+    });
+
+    test('file-based .cs project uses configuration-specific run properties and preserves run-api host environment', async () => {
+        const debugDllPath = '/workspace/bin/Debug/app.dll';
+        const { extension, dotNetService } = createDebuggerExtension('unused-build-output', null, true, true);
+        dotNetService.runApiOutput = JSON.stringify({
+            $type: 'RunCommand',
+            Version: 1,
+            ExecutablePath: '/workspace/bin/Release/app',
+            CommandLineArguments: '',
+            WorkingDirectory: '',
+            EnvironmentVariables: {
+                DOTNET_ROOT: '/usr/share/dotnet'
+            }
+        });
+        dotNetService.fileAppRunProperties = {
+            runCommand: 'dotnet',
+            runArguments: `exec "${debugDllPath}"`
+        };
+
+        const launchConfig: ProjectLaunchConfiguration = {
+            type: 'project',
+            project_path: '/workspace/app.cs',
+            build_configuration: 'Debug',
+            suppress_build: true
+        };
+        const debugConfig: AspireResourceExtendedDebugConfiguration = {
+            runId: '1',
+            debugSessionId: '1',
+            type: 'coreclr',
+            name: 'Test Debug Config',
+            request: 'launch'
+        };
+        const fakeAspireDebugSession = sinon.createStubInstance(AspireDebugSession);
+
+        await extension.createDebugSessionConfigurationCallback!(
+            launchConfig,
+            ['--message', 'hello'],
+            [],
+            { debug: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession },
+            debugConfig);
+
+        assert.strictEqual(dotNetService.fileAppRunBuildConfiguration, 'Debug');
+        assert.strictEqual(dotNetService.fileAppRunEnvironment, undefined);
+        assert.strictEqual(debugConfig.program, 'dotnet');
+        assert.deepStrictEqual(debugConfig.args, ['exec', debugDllPath, '--message', 'hello']);
+        assert.deepStrictEqual(debugConfig.env, { DOTNET_ROOT: '/usr/share/dotnet' });
+        assert.strictEqual(dotNetService.buildDotNetProjectStub.notCalled, true);
     });
 
     test('file-based .cs project preserves run-api DOTNET_ROOT host variables but drops profile env', async () => {
