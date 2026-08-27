@@ -55,6 +55,7 @@ internal sealed class TestTypeScriptStarterProject(Func<DirectoryInfo, Cancellat
 
     public bool RequiresStopForAddPackage => false;
     public bool SupportsLaunchProfiles => false;
+    public bool UsesAspireConfigForPackageResolution => true;
 
     public string? AppHostFileName => "apphost.mts";
 

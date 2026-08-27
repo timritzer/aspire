@@ -180,6 +180,11 @@ internal interface IAppHostProject
     bool SupportsLaunchProfiles { get; }
 
     /// <summary>
+    /// Gets whether integration package resolution should read channel/package state from aspire.config.json.
+    /// </summary>
+    bool UsesAspireConfigForPackageResolution { get; }
+
+    /// <summary>
     /// Gets the file patterns to search for when detecting apphosts.
     /// Examples: ["*.csproj", "*.fsproj", "apphost.cs"] or ["apphost.ts"]
     /// </summary>

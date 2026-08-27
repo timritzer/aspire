@@ -13,7 +13,9 @@ namespace Aspire.Cli.Projects;
 internal sealed class CSharpCliManagedAppHostModuleGenerator(
     IPackagingService packagingService,
     ILogger<CSharpCliManagedAppHostModuleGenerator> logger,
-    string? nugetServiceIndexOverride = null)
+    string? nugetServiceIndexOverride = null,
+    string? identitySdkVersion = null,
+    DirectoryInfo? aspireHomeDirectory = null)
 {
     internal const string ModulesDirectoryName = "modules";
     internal const string ModuleProjectFileName = "Aspire.csproj";
@@ -54,7 +56,7 @@ internal sealed class CSharpCliManagedAppHostModuleGenerator(
 
         var repoRoot = AspireRepositoryDetector.DetectRepositoryRoot(appHostDirectory.FullName);
         var integrationReferences = config
-            .GetIntegrationReferences(VersionHelper.GetDefaultSdkVersion(), configDirectory.FullName)
+            .GetIntegrationReferences(identitySdkVersion ?? VersionHelper.GetDefaultSdkVersion(), configDirectory.FullName)
             .ToList();
         var restoreSources = await new IntegrationRestoreSourceResolver(packagingService, logger, nugetServiceIndexOverride)
             .ResolveAsync(config.Channel, packageSourceOverride, cancellationToken)
@@ -63,12 +65,16 @@ internal sealed class CSharpCliManagedAppHostModuleGenerator(
         {
             using var temporaryConfig = await TemporaryNuGetConfig.CreateAsync(
                 restoreSources.PackageSourceMappings,
-                restoreSources.ConfigureGlobalPackagesFolder).ConfigureAwait(false);
-            File.Copy(temporaryConfig.ConfigFile.FullName, nuGetConfigFile.FullName, overwrite: true);
+                restoreSources.ConfigureGlobalPackagesFolder,
+                restoreSources.ConfigureGlobalPackagesFolder
+                    ? CliPathHelper.GetStagingNuGetPackagesFeedDirectory(aspireHomeDirectory ?? new DirectoryInfo(CliPathHelper.GetDefaultAspireHomeDirectory()), restoreSources.GlobalPackagesFolderSource)
+                    : null).ConfigureAwait(false);
+            var nuGetConfigContent = await File.ReadAllTextAsync(temporaryConfig.ConfigFile.FullName, cancellationToken).ConfigureAwait(false);
+            await GeneratedFileWriter.WriteIfChangedAsync(nuGetConfigFile.FullName, nuGetConfigContent, cancellationToken).ConfigureAwait(false);
         }
         else if (nuGetConfigFile.Exists)
         {
-            nuGetConfigFile.Delete();
+            logger.LogDebug("Preserving existing CLI-managed module NuGet.config at {NuGetConfigPath} because no explicit package source mapping was resolved.", nuGetConfigFile.FullName);
         }
 
         var workingDirectory = IntegrationClosureBuilder.GetAppHostIntegrationCacheDirectory(appHostDirectory);
@@ -78,8 +84,9 @@ internal sealed class CSharpCliManagedAppHostModuleGenerator(
         IReadOnlyList<string> additionalSources = restoreSources.PackageSourceMappings is null
             ? restoreSources.AdditionalSources
             : [];
-        await WriteModuleProjectFileAsync(moduleProjectFile, additionalSources, restoreSources.PackageSourceMappings is not null ? nuGetConfigFile : null, integrationRestoreDir, integrationReferences, repoRoot, cancellationToken).ConfigureAwait(false);
-        await WriteAppHostBuildPropsFileAsync(appHostBuildPropsFile, appHostFile, additionalSources, restoreSources.PackageSourceMappings is not null ? nuGetConfigFile : null, integrationReferences, repoRoot, cancellationToken).ConfigureAwait(false);
+        var restoreConfigFile = restoreSources.PackageSourceMappings is not null || nuGetConfigFile.Exists ? nuGetConfigFile : null;
+        await WriteModuleProjectFileAsync(moduleProjectFile, additionalSources, restoreConfigFile, integrationRestoreDir, integrationReferences, repoRoot, cancellationToken).ConfigureAwait(false);
+        await WriteAppHostBuildPropsFileAsync(appHostBuildPropsFile, appHostFile, additionalSources, restoreConfigFile, integrationReferences, repoRoot, cancellationToken).ConfigureAwait(false);
         await WriteAppHostBuildTargetsFileAsync(appHostBuildTargetsFile, appHostFile, cancellationToken).ConfigureAwait(false);
         if (legacyModuleTargetsFile.Exists)
         {
@@ -158,7 +165,7 @@ internal sealed class CSharpCliManagedAppHostModuleGenerator(
         CancellationToken cancellationToken)
     {
         var generatedProjectPath = Path.ChangeExtension(appHostFile.FullName, ".csproj");
-        var projectCondition = $"'$(MSBuildProjectFullPath)' == '{generatedProjectPath}'";
+        var projectCondition = $"\"$(MSBuildProjectFullPath)\" == \"{CliPathHelper.EscapeMSBuildConditionStringLiteral(generatedProjectPath)}\"";
         var appHostBuildDirectory = Path.Combine(appHostFile.Directory!.FullName, AspireJsonConfiguration.SettingsFolder, "build", "apphost");
 
         var root = new XElement("Project");
@@ -166,6 +173,8 @@ internal sealed class CSharpCliManagedAppHostModuleGenerator(
         propertyGroup.Add(new XElement("BaseOutputPath", CliPathHelper.EnsureTrailingSlash(Path.Combine(appHostBuildDirectory, "bin"))));
         propertyGroup.Add(new XElement("BaseIntermediateOutputPath", CliPathHelper.EnsureTrailingSlash(Path.Combine(appHostBuildDirectory, "obj"))));
         propertyGroup.Add(new XElement("MSBuildProjectExtensionsPath", "$(BaseIntermediateOutputPath)"));
+        propertyGroup.Add(new XElement("ManagePackageVersionsCentrally", "false"));
+        propertyGroup.Add(new XElement("CentralPackageTransitivePinningEnabled", "false"));
 
         if (additionalSources.Count > 0)
         {
@@ -213,7 +222,7 @@ internal sealed class CSharpCliManagedAppHostModuleGenerator(
         CancellationToken cancellationToken)
     {
         var generatedProjectPath = Path.ChangeExtension(appHostFile.FullName, ".csproj");
-        var projectCondition = $"'$(MSBuildProjectFullPath)' == '{generatedProjectPath}'";
+        var projectCondition = $"\"$(MSBuildProjectFullPath)\" == \"{CliPathHelper.EscapeMSBuildConditionStringLiteral(generatedProjectPath)}\"";
 
         var root = new XElement("Project");
         root.Add(new XElement("ItemGroup",

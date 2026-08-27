@@ -93,7 +93,7 @@ public class CSharpCliManagedAppHostModuleGeneratorTests : IDisposable
         var generatedAppHostProjectPath = Path.ChangeExtension(appHostFile.FullName, ".csproj");
         var appHostBuildProps = XDocument.Load(appHostBuildPropsPath);
         var appHostBuildTargets = XDocument.Load(appHostBuildTargetsPath);
-        var projectCondition = $"'$(MSBuildProjectFullPath)' == '{generatedAppHostProjectPath}'";
+        var projectCondition = $"\"$(MSBuildProjectFullPath)\" == \"{CliPathHelper.EscapeMSBuildConditionStringLiteral(generatedAppHostProjectPath)}\"";
         Assert.Null(appHostBuildProps.Root!.Attribute("Sdk"));
         Assert.DoesNotContain(appHostBuildProps.Root!.Elements("Import"), e => e.Attribute("Project")?.Value?.Contains("Directory.Build.props", StringComparison.Ordinal) == true);
 
@@ -113,6 +113,8 @@ public class CSharpCliManagedAppHostModuleGeneratorTests : IDisposable
             Path.Combine(workspace.WorkspaceRoot.FullName, ".aspire", "build", "apphost", "obj") + Path.DirectorySeparatorChar,
             appHostPropertyGroup.Element("BaseIntermediateOutputPath")?.Value);
         Assert.Equal("$(BaseIntermediateOutputPath)", appHostPropertyGroup.Element("MSBuildProjectExtensionsPath")?.Value);
+        Assert.Equal("false", appHostPropertyGroup.Element("ManagePackageVersionsCentrally")?.Value);
+        Assert.Equal("false", appHostPropertyGroup.Element("CentralPackageTransitivePinningEnabled")?.Value);
 
         Assert.Contains(appHostBuildProps.Descendants("PackageReference"), e =>
             e.Attribute("Include")?.Value == "Example.Package" &&
@@ -134,6 +136,124 @@ public class CSharpCliManagedAppHostModuleGeneratorTests : IDisposable
         Assert.Equal("$(BaseIntermediateOutputPath)", moduleDirectoryBuildPropertyGroup.Element("MSBuildProjectExtensionsPath")?.Value);
         Assert.True(File.Exists(Path.Combine(workspace.WorkspaceRoot.FullName, ".aspire", "modules", "Directory.Build.targets")));
         Assert.True(File.Exists(Path.Combine(workspace.WorkspaceRoot.FullName, ".aspire", "modules", "Directory.Packages.props")));
+    }
+
+    [Fact]
+    public async Task TryGenerateAsyncUsesCliIdentitySdkVersionWhenConfigDoesNotSpecifyOne()
+    {
+        using var workspace = TemporaryWorkspace.Create(_outputHelper);
+        var appHostFile = CreateCliManagedAppHost(workspace.WorkspaceRoot);
+        var config = new AspireConfigFile
+        {
+            Packages = new Dictionary<string, string>
+            {
+                ["Example.Package"] = ""
+            }
+        };
+        var generator = new CSharpCliManagedAppHostModuleGenerator(
+            new TestPackagingService(),
+            NullLogger<CSharpCliManagedAppHostModuleGenerator>.Instance,
+            identitySdkVersion: "42.0.0-dev");
+
+        var moduleProjectFile = await generator.TryGenerateAsync(appHostFile, config, workspace.WorkspaceRoot, packageSourceOverride: null, CancellationToken.None);
+
+        Assert.NotNull(moduleProjectFile);
+        var moduleProject = XDocument.Load(moduleProjectFile.FullName);
+        Assert.Contains(moduleProject.Descendants("PackageReference"), e =>
+            e.Attribute("Include")?.Value == "Example.Package" &&
+            e.Attribute("Version")?.Value == "42.0.0-dev");
+    }
+
+    [Fact]
+    public async Task TryGenerateAsyncPreservesExistingModuleNuGetConfigWhenNoExplicitMappingIsResolved()
+    {
+        using var workspace = TemporaryWorkspace.Create(_outputHelper);
+        var appHostFile = CreateCliManagedAppHost(workspace.WorkspaceRoot);
+        var modulesDirectory = workspace.WorkspaceRoot.CreateSubdirectory(".aspire").CreateSubdirectory("modules");
+        var nuGetConfigPath = Path.Combine(modulesDirectory.FullName, "nuget.config");
+        await File.WriteAllTextAsync(nuGetConfigPath, """
+            <configuration>
+              <packageSources>
+                <add key="source-override" value="/tmp/source-override" />
+              </packageSources>
+            </configuration>
+            """);
+        var generator = new CSharpCliManagedAppHostModuleGenerator(
+            new TestPackagingService(),
+            NullLogger<CSharpCliManagedAppHostModuleGenerator>.Instance);
+
+        var moduleProjectFile = await generator.TryGenerateAsync(appHostFile, new AspireConfigFile(), workspace.WorkspaceRoot, packageSourceOverride: null, CancellationToken.None);
+
+        Assert.NotNull(moduleProjectFile);
+        Assert.True(File.Exists(nuGetConfigPath));
+        var moduleProject = XDocument.Load(moduleProjectFile.FullName);
+        Assert.Equal(nuGetConfigPath, moduleProject.Root!.Element("PropertyGroup")!.Element("RestoreConfigFile")!.Value);
+    }
+
+    [Fact]
+    public async Task TryGenerateAsyncUsesStableGlobalPackagesFolderForStagingChannel()
+    {
+        using var workspace = TemporaryWorkspace.Create(_outputHelper);
+        var appHostFile = CreateCliManagedAppHost(workspace.WorkspaceRoot);
+        var aspireHomeDirectory = workspace.WorkspaceRoot.CreateSubdirectory(".aspire-home");
+        var stagingSource = "https://example.invalid/staging";
+        var config = new AspireConfigFile
+        {
+            Channel = PackageChannelNames.Staging,
+            SdkVersion = "13.2.0"
+        };
+        var packagingService = new TestPackagingService
+        {
+            GetChannelsAsyncCallback = _ =>
+            {
+                var staging = PackageChannel.CreateExplicitChannel(
+                    PackageChannelNames.Staging,
+                    PackageChannelQuality.Both,
+                    [new PackageMapping("Aspire*", stagingSource)],
+                    new FakeNuGetPackageCache(),
+                    new TestFeatures(),
+                    NullLogger.Instance,
+                    configureGlobalPackagesFolder: true);
+                return Task.FromResult<IEnumerable<PackageChannel>>([staging]);
+            }
+        };
+        var generator = new CSharpCliManagedAppHostModuleGenerator(
+            packagingService,
+            NullLogger<CSharpCliManagedAppHostModuleGenerator>.Instance,
+            aspireHomeDirectory: aspireHomeDirectory);
+
+        var moduleProjectFile = await generator.TryGenerateAsync(appHostFile, config, workspace.WorkspaceRoot, packageSourceOverride: null, CancellationToken.None);
+
+        Assert.NotNull(moduleProjectFile);
+        var restoreConfigFile = XDocument.Load(moduleProjectFile.FullName).Root!
+            .Element("PropertyGroup")!
+            .Element("RestoreConfigFile")!
+            .Value;
+        var nugetConfig = XDocument.Load(restoreConfigFile);
+        Assert.Equal(
+            CliPathHelper.GetStagingNuGetPackagesFeedDirectory(aspireHomeDirectory, stagingSource),
+            nugetConfig.Root!.Element("config")!.Elements("add").Single(e => e.Attribute("key")?.Value == "globalPackagesFolder").Attribute("value")!.Value);
+    }
+
+    [Fact]
+    public async Task TryGenerateAsyncEscapesAppHostPathInGeneratedMSBuildConditions()
+    {
+        using var workspace = TemporaryWorkspace.Create(_outputHelper);
+        var appHostDirectory = workspace.WorkspaceRoot.CreateSubdirectory("O'Brien");
+        var appHostFile = CreateCliManagedAppHost(appHostDirectory);
+        var generator = new CSharpCliManagedAppHostModuleGenerator(
+            new TestPackagingService(),
+            NullLogger<CSharpCliManagedAppHostModuleGenerator>.Instance);
+
+        await generator.TryGenerateAsync(appHostFile, new AspireConfigFile(), appHostDirectory, packageSourceOverride: null, CancellationToken.None);
+
+        var generatedAppHostProjectPath = Path.ChangeExtension(appHostFile.FullName, ".csproj");
+        var expectedCondition = $"\"$(MSBuildProjectFullPath)\" == \"{CliPathHelper.EscapeMSBuildConditionStringLiteral(generatedAppHostProjectPath)}\"";
+        var appHostBuildProps = XDocument.Load(Path.Combine(appHostDirectory.FullName, ".aspire", "modules", "AppHost.Directory.Build.props"));
+        var appHostBuildTargets = XDocument.Load(Path.Combine(appHostDirectory.FullName, ".aspire", "modules", "AppHost.Directory.Build.targets"));
+
+        Assert.Contains(appHostBuildProps.Root!.Elements("PropertyGroup"), e => e.Attribute("Condition")?.Value == expectedCondition);
+        Assert.Contains(appHostBuildTargets.Root!.Elements("ItemGroup"), e => e.Attribute("Condition")?.Value == expectedCondition);
     }
 
     [Fact]

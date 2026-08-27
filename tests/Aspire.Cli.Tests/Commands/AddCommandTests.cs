@@ -589,6 +589,84 @@ public class AddCommandTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task IntegrationSearchCommandFormatJsonWithCliManagedCSharpAppHostPinnedToDailyChannelAlsoSearchesConfiguredChannel()
+    {
+        var rawJson = string.Empty;
+        var testInteractionService = new TestInteractionService
+        {
+            DisplayRawTextCallback = text => rawJson = text
+        };
+
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var appHostFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "apphost.cs"));
+        await File.WriteAllTextAsync(appHostFile.FullName, """
+            #:project .aspire/modules/Aspire.csproj
+
+            var builder = DistributedApplication.CreateBuilder(args);
+            builder.Build().Run();
+            """);
+        await File.WriteAllTextAsync(Path.Combine(workspace.WorkspaceRoot.FullName, AspireConfigFile.FileName), """
+            {
+              "channel": "daily",
+              "features": {
+                "experimentalCliManagedAppHost": true
+              }
+            }
+            """);
+
+        var implicitHits = 0;
+        var dailyHits = 0;
+        var implicitCache = new FakeNuGetPackageCache
+        {
+            GetIntegrationPackagesAsyncCallback = (_, _, _, _) =>
+            {
+                Interlocked.Increment(ref implicitHits);
+                return Task.FromResult<IEnumerable<NuGetPackage>>([CreatePackage("Aspire.Hosting.Redis", "1.0.0")]);
+            }
+        };
+        var dailyCache = new FakeNuGetPackageCache
+        {
+            GetIntegrationPackagesAsyncCallback = (_, _, _, _) =>
+            {
+                Interlocked.Increment(ref dailyHits);
+                return Task.FromResult<IEnumerable<NuGetPackage>>([CreatePackage("Aspire.Hosting.Redis", "2.0.0")]);
+            }
+        };
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ => testInteractionService;
+            options.PackagingServiceFactory = _ => new TestPackagingService
+            {
+                GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([
+                    PackageChannel.CreateImplicitChannel(implicitCache, new TestFeatures(), NullLogger.Instance),
+                    PackageChannel.CreateExplicitChannel("daily", PackageChannelQuality.Both, [new PackageMapping("Aspire*", "daily")], dailyCache, new TestFeatures(), NullLogger.Instance)
+                ])
+            };
+        });
+        services.AddSingleton<IAppHostProjectFactory>(new TestAppHostProjectFactory
+        {
+            UsesAspireConfigForPackageResolution = true,
+            CanHandleCallback = file => file.Name.Equals("apphost.cs", StringComparison.OrdinalIgnoreCase),
+            ValidateAppHostCallback = _ => new AppHostValidationResult(IsValid: true)
+        });
+        using var provider = services.BuildServiceProvider();
+
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse($"integration search redis --apphost \"{appHostFile.FullName}\" --format json");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.True(implicitHits > 0, "Implicit channel must always be searched.");
+        Assert.True(dailyHits > 0, "CLI-managed C# apphost persisted channel must also be searched.");
+
+        var integration = Assert.Single(ReadIntegrationResults(rawJson));
+        Assert.Equal("Aspire.Hosting.Redis", integration.Package);
+        Assert.Equal("1.0.0", integration.Version);
+    }
+
+    [Fact]
     public async Task IntegrationSearchCommandFormatJsonWithTypeScriptAppHostPinnedToStableChannelStillSurfacesPrereleaseOnlyPackages()
     {
         // Regression for https://github.com/microsoft/aspire/issues/17725 specifically.

@@ -985,7 +985,7 @@ public class NewCommandTests(ITestOutputHelper outputHelper)
 
         using var provider = services.BuildServiceProvider();
         var command = provider.GetRequiredService<NewCommand>();
-        var result = command.Parse($"new {KnownTemplateId.CSharpCliManagedEmptyAppHost} --name TestApp --output ./output --localhost-tld false --suppress-agent-init --source \"{sourceOverride}\" --version 9.2.0");
+        var result = command.Parse($"new {KnownTemplateId.CSharpCliManagedEmptyAppHost} --name TestApp --output ./output --localhost-tld false --suppress-agent-init --source \"{sourceOverride}\" --channel daily --version 9.2.0");
 
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
@@ -998,6 +998,10 @@ public class NewCommandTests(ITestOutputHelper outputHelper)
         using var aspireConfig = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(aspireConfigPath));
         Assert.True(aspireConfig.RootElement.TryGetProperty("features", out var features));
         Assert.True(features.GetProperty(KnownFeatures.ExperimentalCliManagedAppHost).GetBoolean());
+        var config = AspireConfigFile.Load(outputPath);
+        Assert.NotNull(config);
+        Assert.Equal("daily", config.Channel);
+        Assert.Equal("9.2.0", config.SdkVersion);
         Assert.False(File.Exists(Path.Combine(outputPath, "apphost.run.json")));
         Assert.False(File.Exists(Path.Combine(outputPath, "AppHost.csproj")));
         Assert.False(File.Exists(Path.Combine(outputPath, "nuget.config")));

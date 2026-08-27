@@ -333,8 +333,8 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
     /// for a skipped restore at all.
     /// </summary>
     /// <remarks>
-    /// The generated project file encodes package identities and versions, project reference paths,
-    /// channel sources, and the synthesized NuGet.config path. Referenced project files are hashed
+    /// The generated project file and optional synthesized NuGet.config encode package identities
+    /// and versions, project reference paths, and channel sources. Referenced project files are hashed
     /// as well because restore resolves their dependencies too: a referenced project bumping its own
     /// Aspire.Hosting version changes the resolved closure without changing a single byte of the
     /// generated project file.
@@ -356,9 +356,21 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
         IReadOnlyList<IntegrationReference> packageRefs,
         IReadOnlyList<IntegrationReference> projectRefs,
         CancellationToken cancellationToken)
+        => await ComputeRestoreInputsAsync(projectContent, packageRefs, projectRefs, restoreConfigContent: null, cancellationToken).ConfigureAwait(false);
+
+    internal static async Task<RestoreInputs> ComputeRestoreInputsAsync(
+        string projectContent,
+        IReadOnlyList<IntegrationReference> packageRefs,
+        IReadOnlyList<IntegrationReference> projectRefs,
+        string? restoreConfigContent,
+        CancellationToken cancellationToken)
     {
         var hash = new XxHash3();
         hash.Append(Encoding.UTF8.GetBytes(projectContent));
+        if (restoreConfigContent is not null)
+        {
+            hash.Append(Encoding.UTF8.GetBytes(restoreConfigContent));
+        }
 
         var isFloating = HasFloatingPackageVersion(packageRefs);
 
@@ -734,8 +746,11 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
         Directory.CreateDirectory(restoreDir);
 
         var restoreSources = await ResolveIntegrationRestoreSourcesAsync(requestedChannel, packageSourceOverride, cancellationToken).ConfigureAwait(false);
-        using var temporaryNuGetConfig = await CreateTemporaryNuGetConfigAsync(restoreSources).ConfigureAwait(false);
-        var channelSources = temporaryNuGetConfig is null
+        var restoreConfigFile = await WriteRestoreNuGetConfigAsync(restoreDir, restoreSources, cancellationToken).ConfigureAwait(false);
+        var restoreConfigContent = restoreConfigFile is null
+            ? null
+            : await File.ReadAllTextAsync(restoreConfigFile.FullName, cancellationToken).ConfigureAwait(false);
+        var channelSources = restoreConfigFile is null
             ? GetNuGetSources(restoreSources)
             : null;
         var projectContent = GenerateIntegrationProjectFile(
@@ -744,7 +759,7 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
             restoreDir,
             channelSources,
             useExactPackageVersions: !string.IsNullOrWhiteSpace(packageSourceOverride),
-            restoreConfigFile: temporaryNuGetConfig?.ConfigFile.FullName);
+            restoreConfigFile: restoreConfigFile?.FullName);
         var projectFilePath = Path.Combine(restoreDir, IntegrationProjectFileName);
         await WriteIfChangedAsync(projectFilePath, projectContent, cancellationToken);
 
@@ -779,7 +794,7 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
         // compiled. And because a stale or partially cleaned obj/ directory is the one thing the
         // fingerprint cannot see, a no-restore build that fails on the assets file is retried with
         // restore rather than reported.
-        var restoreInputs = await ComputeRestoreInputsAsync(projectContent, packageRefs, projectRefs, cancellationToken).ConfigureAwait(false);
+        var restoreInputs = await ComputeRestoreInputsAsync(projectContent, packageRefs, projectRefs, restoreConfigContent, cancellationToken).ConfigureAwait(false);
         var restoreFingerprint = restoreInputs.IsEligibleForSkip ? restoreInputs.Fingerprint : null;
         var skipRestore = restoreFingerprint is not null && CanSkipIntegrationRestore(restoreDir, restoreFingerprint, _logger);
 
@@ -928,52 +943,33 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
         return await TemporaryNuGetConfig.CreateAsync(
             restoreSources.PackageSourceMappings,
             restoreSources.ConfigureGlobalPackagesFolder,
-            restoreSources.ConfigureGlobalPackagesFolder ? ResolveStableGlobalPackagesFolder(restoreSources.GlobalPackagesFolderSource) : null).ConfigureAwait(false);
+            restoreSources.ConfigureGlobalPackagesFolder
+                ? CliPathHelper.GetStagingNuGetPackagesFeedDirectory(_executionContext.AspireHomeDirectory, restoreSources.GlobalPackagesFolderSource)
+                : null).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Returns the absolute <c>globalPackagesFolder</c> path to write into a temporary NuGet.config
-    /// when the resolved channel asks for per-build cache isolation (today: <c>staging</c>).
-    /// </summary>
-    /// <remarks>
-    /// The default <see cref="NuGetConfigMerger.DefaultGlobalPackagesFolderValue"/> is a relative
-    /// <c>.nugetpackages</c> path that NuGet resolves next to the nuget.config it came from. For
-    /// the <see cref="NuGetConfigMerger"/> workspace-merge flow that's fine — the merged config is
-    /// persistent. For <see cref="PrebuiltAppHostServer"/>'s <see cref="TemporaryNuGetConfig"/>
-    /// the config file lives in a Directory.CreateTempSubdirectory("aspire-nuget-config") folder
-    /// that <see cref="TemporaryNuGetConfig.Dispose"/> recursively deletes after restore. NuGet
-    /// would have just populated <c>&lt;temp&gt;/.nugetpackages/&lt;id&gt;/&lt;version&gt;/</c>
-    /// with the staging assemblies, <see cref="NuGet.BundleNuGetService"/> would have baked those
-    /// paths into <c>integration-package-probe-manifest.json</c>, and aspire-managed would then
-    /// try to load assemblies the dispose just removed — observed as a hang during DI / assembly
-    /// loading on macOS osx-arm64 polyglot staging builds. Anchoring the override at a stable
-    /// per-build location keeps the cached packages alive for as long as any manifest references
-    /// them.
-    ///
-    /// The cache lives under <see cref="CliExecutionContext.AspireHomeDirectory"/> (i.e. the
-    /// <c>ASPIRE_HOME</c> override when set, otherwise <c>~/.aspire</c>) rather than under
-    /// <see cref="_workingDirectory"/> so that two AppHosts running on the same machine against
-    /// the same staging build can share a single restore — the unit of cache isolation here is
-    /// the staging build, not the individual restore command.
-    ///
-    /// The cache subdirectory is keyed by a truncated hash of the resolved feed URL (first 8
-    /// hex chars of <see cref="System.IO.Hashing.XxHash3"/> over the trimmed/lower-cased URL).
-    /// Two staging builds of the same release branch — which share the same stable-shaped semver
-    /// (e.g. <c>13.4.0</c>) but ship from different darc feeds — therefore each get their own
-    /// cache. A user pointing the same CLI at multiple <c>overrideStagingFeed</c> values during
-    /// dev/test also gets a distinct cache per feed, instead of one bucket silently shared across
-    /// feeds. NuGet identifies packages by <c>(id, version)</c> only, so without that per-feed
-    /// key the second feed's restore would silently reuse the first feed's now-stale
-    /// <c>13.4.0</c> assemblies. When <paramref name="feedUrl"/> is null or empty (defensive —
-    /// both call sites currently always pass a real URL) the key falls back to <c>"default"</c>
-    /// so the path is still well-formed.
-    /// </remarks>
-    private string ResolveStableGlobalPackagesFolder(string? feedUrl)
+    private async Task<FileInfo?> WriteRestoreNuGetConfigAsync(string restoreDir, IntegrationRestoreSources restoreSources, CancellationToken cancellationToken)
     {
-        var cacheKey = CliPathHelper.ComputeStagingFeedCacheKey(feedUrl) ?? "default";
-        return Path.Combine(
-            CliPathHelper.GetStagingNuGetPackagesDirectory(_executionContext.AspireHomeDirectory),
-            cacheKey);
+        var restoreConfigFile = new FileInfo(Path.Combine(restoreDir, "nuget.config"));
+        if (restoreSources.PackageSourceMappings is null)
+        {
+            if (restoreConfigFile.Exists)
+            {
+                restoreConfigFile.Delete();
+            }
+
+            return null;
+        }
+
+        using var temporaryConfig = await CreateTemporaryNuGetConfigAsync(restoreSources).ConfigureAwait(false);
+        if (temporaryConfig is null)
+        {
+            return null;
+        }
+
+        var content = await File.ReadAllTextAsync(temporaryConfig.ConfigFile.FullName, cancellationToken).ConfigureAwait(false);
+        await WriteIfChangedAsync(restoreConfigFile.FullName, content, cancellationToken).ConfigureAwait(false);
+        return restoreConfigFile;
     }
 
     private async Task<string?> ResolveLocalPackageSourceOverrideAsync(string? requestedChannel, CancellationToken cancellationToken)

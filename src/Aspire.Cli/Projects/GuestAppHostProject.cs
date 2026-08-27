@@ -127,6 +127,9 @@ internal sealed class GuestAppHostProject : IAppHostProject, IGuestAppHostSdkGen
     /// <inheritdoc />
     public bool SupportsLaunchProfiles => false;
 
+    /// <inheritdoc />
+    public bool UsesAspireConfigForPackageResolution => true;
+
     /// <summary>
     /// Gets the effective SDK version from configuration (inherits from parent directories)
     /// or falls back to the default SDK version.

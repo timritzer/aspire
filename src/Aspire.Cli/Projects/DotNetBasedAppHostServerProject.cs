@@ -166,7 +166,8 @@ internal sealed class DotNetBasedAppHostServerProject : IAppHostServerProject
             integrations,
             _repoRoot,
             isAspireProjectResource: false,
-            addedProjectPaths: addedProjects);
+            addedProjectPaths: addedProjects,
+            packageVersionAttributeName: CSharpPackageReference.VersionOverrideAttributeName);
 
         // Always add Aspire.Hosting project reference
         projectFile.AddRepositoryProjectReferenceIfExists(

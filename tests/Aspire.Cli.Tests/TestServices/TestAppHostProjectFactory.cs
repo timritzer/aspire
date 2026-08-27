@@ -48,6 +48,7 @@ internal sealed class TestAppHostProjectFactory : IAppHostProjectFactory
 
     public bool RequiresStopForAddPackage { get; set; }
     public bool SupportsLaunchProfiles { get; set; } = true;
+    public bool UsesAspireConfigForPackageResolution { get; set; }
 
     /// <summary>
     /// Optional detection patterns to advertise from the test project.
@@ -159,6 +160,7 @@ internal sealed class TestAppHostProjectFactory : IAppHostProjectFactory
         public string DisplayName => _factory.DisplayName;
         public bool RequiresStopForAddPackage => _factory.RequiresStopForAddPackage;
         public bool SupportsLaunchProfiles => _factory.SupportsLaunchProfiles;
+        public bool UsesAspireConfigForPackageResolution => _factory.UsesAspireConfigForPackageResolution;
         public string? AppHostFileName => "AppHost.csproj";
 
         public bool IsUsingProjectReferences(FileInfo appHostFile)

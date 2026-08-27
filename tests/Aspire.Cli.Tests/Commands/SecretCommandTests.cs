@@ -119,6 +119,7 @@ public class SecretCommandTests(ITestOutputHelper outputHelper)
         public string DisplayName => "Test";
         public bool RequiresStopForAddPackage => false;
         public bool SupportsLaunchProfiles => false;
+        public bool UsesAspireConfigForPackageResolution => false;
         public string? AppHostFileName => null;
 
         public Task<bool> AddPackageAsync(AddPackageContext context, CancellationToken cancellationToken) => throw new NotSupportedException();

@@ -77,13 +77,23 @@ internal sealed class CliManagedDotNetAppHostProject : DotNetAppHostProject
         _runner = runner;
         _logger = logger;
         _environment = environment;
-        _cliManagedModuleGenerator = new CSharpCliManagedAppHostModuleGenerator(packagingService, cliManagedModuleGeneratorLogger, executionContext.NuGetServiceIndexOverride);
+        _cliManagedModuleGenerator = new CSharpCliManagedAppHostModuleGenerator(
+            packagingService,
+            cliManagedModuleGeneratorLogger,
+            executionContext.NuGetServiceIndexOverride,
+            executionContext.IdentitySdkVersion,
+            executionContext.AspireHomeDirectory);
     }
 
     public override bool CanHandle(FileInfo appHostFile)
         => IsCliManagedSingleFileAppHost(appHostFile, _features);
 
     public override bool RequiresStopForAddPackage => false;
+
+    /// <inheritdoc />
+    public override bool UsesAspireConfigForPackageResolution => true;
+
+    protected override bool FallbackToDotNetPackageAdd => false;
 
     public override Task<AppHostValidationResult> ValidateAppHostAsync(FileInfo appHostFile, CancellationToken cancellationToken)
     {
@@ -131,10 +141,32 @@ internal sealed class CliManagedDotNetAppHostProject : DotNetAppHostProject
         => IsCliManagedSingleFileAppHost(appHostFile, _features);
 
     protected override async Task PrepareForRunAsync(FileInfo appHostFile, CancellationToken cancellationToken)
-        => await _cliManagedModuleGenerator.TryGenerateAsync(appHostFile, cancellationToken);
+        => await PrepareModuleAndClosureAsync(appHostFile, cancellationToken).ConfigureAwait(false);
 
     protected override async Task PrepareForPublishAsync(FileInfo appHostFile, CancellationToken cancellationToken)
-        => await _cliManagedModuleGenerator.TryGenerateAsync(appHostFile, cancellationToken);
+        => await PrepareModuleAndClosureAsync(appHostFile, cancellationToken).ConfigureAwait(false);
+
+    private async Task PrepareModuleAndClosureAsync(FileInfo appHostFile, CancellationToken cancellationToken)
+    {
+        var moduleProjectFile = await _cliManagedModuleGenerator.TryGenerateAsync(appHostFile, cancellationToken).ConfigureAwait(false);
+        if (moduleProjectFile is null)
+        {
+            throw new InvalidOperationException($"Failed to generate CLI-managed AppHost module for '{appHostFile.FullName}'.");
+        }
+
+        var outputCollector = new OutputCollector();
+        var restoreSucceeded = await RestoreIntegrationClosureAsync(
+            appHostFile,
+            moduleProjectFile,
+            CreateModuleBuildInvocationOptions(appHostFile),
+            outputCollector,
+            cancellationToken).ConfigureAwait(false);
+
+        if (!restoreSucceeded)
+        {
+            throw new InvalidOperationException($"Failed to restore CLI-managed AppHost integration closure for '{appHostFile.FullName}'.");
+        }
+    }
 
     protected override void ConfigureAppHostInvocationOptions(FileInfo appHostFile, ProcessInvocationOptions options)
     {
@@ -490,7 +522,7 @@ internal sealed class CliManagedDotNetAppHostProject : DotNetAppHostProject
             var value = File.ReadAllText(statePath).Trim();
             return string.IsNullOrWhiteSpace(value) ? null : value;
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return null;
         }

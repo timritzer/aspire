@@ -134,6 +134,26 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task ComputeRestoreInputsAsync_FingerprintChangesWhenRestoreConfigContentChanges()
+    {
+        var first = await PrebuiltAppHostServer.ComputeRestoreInputsAsync(
+            "<Project><PropertyGroup><RestoreConfigFile>nuget.config</RestoreConfigFile></PropertyGroup></Project>",
+            [],
+            [],
+            "<configuration><packageSources><add key=\"a\" value=\"https://example.invalid/a\" /></packageSources></configuration>",
+            CancellationToken.None);
+
+        var second = await PrebuiltAppHostServer.ComputeRestoreInputsAsync(
+            "<Project><PropertyGroup><RestoreConfigFile>nuget.config</RestoreConfigFile></PropertyGroup></Project>",
+            [],
+            [],
+            "<configuration><packageSources><add key=\"b\" value=\"https://example.invalid/b\" /></packageSources></configuration>",
+            CancellationToken.None);
+
+        Assert.NotEqual(first.Fingerprint, second.Fingerprint);
+    }
+
+    [Fact]
     public async Task ComputeRestoreInputsAsync_FingerprintChangesWhenACentrallyManagedVersionChanges()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);

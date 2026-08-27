@@ -131,7 +131,10 @@ internal partial class DotNetAppHostProject : IAppHostProject
     public virtual bool RequiresStopForAddPackage => true;
 
     /// <inheritdoc />
-    public bool SupportsLaunchProfiles => true;
+    public virtual bool SupportsLaunchProfiles => true;
+
+    /// <inheritdoc />
+    public virtual bool UsesAspireConfigForPackageResolution => false;
 
     // ═══════════════════════════════════════════════════════════════
     // DETECTION
@@ -2520,7 +2523,7 @@ internal partial class DotNetAppHostProject : IAppHostProject
     }
 
     /// <inheritdoc />
-    public async Task<bool> AddPackageAsync(AddPackageContext context, CancellationToken cancellationToken)
+    public virtual async Task<bool> AddPackageAsync(AddPackageContext context, CancellationToken cancellationToken)
     {
         var outputCollector = new OutputCollector(_fileLoggerProvider, CliLogFormat.Categories.Package);
         context.OutputCollector = outputCollector;
@@ -2528,6 +2531,11 @@ internal partial class DotNetAppHostProject : IAppHostProject
         if (await TryAddPackageAsync(context, outputCollector, cancellationToken))
         {
             return true;
+        }
+
+        if (!FallbackToDotNetPackageAdd)
+        {
+            return false;
         }
 
         var options = new ProcessInvocationOptions
@@ -2546,6 +2554,8 @@ internal partial class DotNetAppHostProject : IAppHostProject
 
         return result == 0;
     }
+
+    protected virtual bool FallbackToDotNetPackageAdd => true;
 
     protected virtual Task<bool> TryAddPackageAsync(AddPackageContext context, OutputCollector outputCollector, CancellationToken cancellationToken)
         => Task.FromResult(false);

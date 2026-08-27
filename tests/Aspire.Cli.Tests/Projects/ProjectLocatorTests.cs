@@ -2231,6 +2231,7 @@ builder.Build().Run();");
             public string DisplayName => "TypeScript";
             public bool RequiresStopForAddPackage => false;
             public bool SupportsLaunchProfiles => false;
+            public bool UsesAspireConfigForPackageResolution => true;
             public string? AppHostFileName => supportedFileName;
 
             public bool IsUsingProjectReferences(FileInfo appHostFile) => false;

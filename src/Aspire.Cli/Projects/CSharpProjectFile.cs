@@ -64,7 +64,8 @@ internal sealed class CSharpProjectFile(string sdk = "Microsoft.NET.Sdk")
         bool? isAspireProjectResource = null,
         bool? referenceOutputAssembly = null,
         bool? privateReference = null,
-        ISet<string>? addedProjectPaths = null)
+        ISet<string>? addedProjectPaths = null,
+        string packageVersionAttributeName = CSharpPackageReference.DefaultVersionAttributeName)
     {
         var addedIntegrations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -107,7 +108,7 @@ internal sealed class CSharpProjectFile(string sdk = "Microsoft.NET.Sdk")
                 throw new InvalidOperationException($"Integration '{integrationReference.Name}' is neither a project reference nor a package reference (both Version and ProjectPath are null).");
             }
 
-            PackageReferences.Add(new CSharpPackageReference(integrationReference.Name, integrationReference.Version));
+            PackageReferences.Add(new CSharpPackageReference(integrationReference.Name, integrationReference.Version, packageVersionAttributeName));
         }
     }
 
@@ -223,7 +224,7 @@ internal sealed class CSharpProjectFile(string sdk = "Microsoft.NET.Sdk")
 
         if (packageReference.Version is not null)
         {
-            element.Add(new XAttribute("Version", packageReference.Version));
+            element.Add(new XAttribute(packageReference.VersionAttributeName, packageReference.Version));
         }
 
         return element;
@@ -275,7 +276,11 @@ internal sealed record CSharpProjectProperty(string Name, string Value);
 /// <summary>
 /// Represents a generated package reference.
 /// </summary>
-internal sealed record CSharpPackageReference(string Name, string? Version = null);
+internal sealed record CSharpPackageReference(string Name, string? Version = null, string VersionAttributeName = CSharpPackageReference.DefaultVersionAttributeName)
+{
+    public const string DefaultVersionAttributeName = "Version";
+    public const string VersionOverrideAttributeName = "VersionOverride";
+}
 
 /// <summary>
 /// Represents a generated project reference.

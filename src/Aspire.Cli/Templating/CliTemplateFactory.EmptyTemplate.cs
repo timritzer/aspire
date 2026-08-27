@@ -6,7 +6,6 @@ using Aspire.Cli.Configuration;
 using Aspire.Cli.Projects;
 using Aspire.Cli.Resources;
 using Aspire.Cli.Scaffolding;
-using Aspire.Cli.Utils;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
 
@@ -195,7 +194,16 @@ internal sealed partial class CliTemplateFactory
                 TemplatingStrings.CreatingNewProject,
                 (Func<Task<TemplateResult>>)(async () =>
                 {
-                    await WriteCSharpCliManagedEmptyAppHostAsync(inputs.Version, outputPath, projectName, useLocalhostTld, cancellationToken);
+                    var aspireVersion = string.IsNullOrWhiteSpace(inputs.Version)
+                        ? _executionContext.IdentitySdkVersion
+                        : inputs.Version;
+                    await WriteCSharpCliManagedEmptyAppHostAsync(aspireVersion, outputPath, projectName, useLocalhostTld, cancellationToken);
+
+                    var config = AspireConfigFile.LoadOrCreate(outputPath);
+                    config.Channel = inputs.Channel;
+                    config.SdkVersion = aspireVersion;
+                    config.Save(outputPath);
+
                     return new TemplateResult((int)CliExitCodes.Success, outputPath);
                 }), emoji: KnownEmojis.Rocket);
 
@@ -248,7 +256,7 @@ internal sealed partial class CliTemplateFactory
     private async Task WriteCSharpCliManagedEmptyAppHostAsync(string? templateVersion, string outputPath, string projectName, bool useLocalhostTld, CancellationToken cancellationToken)
     {
         var aspireVersion = string.IsNullOrWhiteSpace(templateVersion)
-            ? VersionHelper.GetDefaultTemplateVersion()
+            ? _executionContext.IdentitySdkVersion
             : templateVersion;
         var projectNameLower = projectName.ToLowerInvariant();
         var ports = GenerateRandomPorts();

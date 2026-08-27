@@ -526,7 +526,6 @@ internal sealed class AppHostLauncher(
         }
         var childStartedAt = childProcess.StartTime;
         logger.LogDebug("Child CLI process started with PID: {PID}", childProcess.ProcessId);
-        logger.LogDebug("Child CLI process started with PID: {PID}", childProcess.ProcessId);
 
         var startTime = timeProvider.GetUtcNow();
         using var waitForBackchannelActivity = profilingTelemetry.StartDetachedWaitForBackchannel(childProcess.ProcessId, expectedHash, legacyHashes.Count > 0);
