@@ -28,123 +28,83 @@ internal static class PathNormalizer
     }
 
     /// <summary>
-    /// Resolves an existing path to its filesystem-canonical form by using the actual casing
-    /// of each path component.
+    /// On Windows and macOS, resolves a path to its filesystem-canonical form by querying the OS
+    /// for the actual casing of each path component. On Linux this is a no-op.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// Use this when a path must match what MSBuild or another filesystem enumerator reports for the same file.
-    /// Case behavior belongs to the containing volume rather than the operating system: macOS commonly uses
-    /// case-insensitive volumes, while Windows directories can opt into case sensitivity.
-    /// </para>
-    /// <para>
-    /// The path is returned unchanged when it does not exist or its on-disk casing cannot be resolved.
-    /// </para>
+    /// Use this when aliases on a case-insensitive filesystem must produce the same identity while
+    /// preserving distinct paths on case-sensitive macOS volumes. A user who types
+    /// <c>--apphost c:\FOO\bar.csproj</c> will get back <c>C:\foo\bar.csproj</c>
+    /// if that is the on-disk casing.
     /// </remarks>
-    /// <param name="path">A path to a file or directory.</param>
+    /// <param name="path">An absolute path to a file that exists on disk.</param>
     /// <returns>
-    /// The path with filesystem-canonical casing, or <paramref name="path"/> unchanged if it cannot be resolved.
+    /// The path with OS-canonical casing, or <paramref name="path"/> unchanged if it
+    /// cannot be resolved (file does not exist, UNC path, etc.).
     /// </returns>
     public static string ResolveToFilesystemPath(string path)
     {
-        if (string.IsNullOrEmpty(path))
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS())
         {
             return path;
         }
 
-        try
+        var root = Path.GetPathRoot(path);
+        if (string.IsNullOrEmpty(root))
         {
-            var fullPath = Path.GetFullPath(path);
-            if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
+            return path;
+        }
+
+        var segments = path[root.Length..].Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        // Windows APIs preserve the caller's drive-letter casing even while directory enumeration
+        // recovers every later component. Normalize the drive root so c:\foo and C:\foo produce
+        // the same canonical path and callers receive the conventional on-disk form.
+        var current = OperatingSystem.IsWindows() && root.Length >= 2 && root[1] == ':'
+            ? $"{char.ToUpperInvariant(root[0])}{root[1..]}"
+            : root;
+        foreach (var segment in segments)
+        {
+            var candidate = Path.Combine(current, segment);
+            if (!File.Exists(candidate) && !Directory.Exists(candidate))
             {
                 return path;
             }
 
-            var root = Path.GetPathRoot(fullPath);
-            if (string.IsNullOrEmpty(root))
+            try
             {
-                return path;
-            }
-
-            if (OperatingSystem.IsWindows() && root.Length >= 2 && root[1] == ':')
-            {
-                root = char.ToUpperInvariant(root[0]) + root[1..];
-            }
-
-            var segments = fullPath[root.Length..].Split(
-                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                StringSplitOptions.RemoveEmptyEntries);
-            var current = root;
-
-            foreach (var segment in segments)
-            {
-                // The pattern overload lets the filesystem apply the common exact/platform-default casing
-                // filter instead of eagerly comparing every sibling. If it yields no unique result, fall back
-                // to a full comparison so case-insensitive volumes and case-sensitive directories with names
-                // that differ only by case retain the behavior below.
-                using (var filteredMatches = Directory.EnumerateFileSystemEntries(current, segment).GetEnumerator())
-                {
-                    if (filteredMatches.MoveNext())
-                    {
-                        var filteredMatch = filteredMatches.Current;
-                        if (!filteredMatches.MoveNext())
-                        {
-                            current = filteredMatch;
-                            continue;
-                        }
-                    }
-                }
-
                 string? exactMatch = null;
                 string? caseInsensitiveMatch = null;
-                var caseInsensitiveMatchIsAmbiguous = false;
-
-                foreach (var candidate in Directory.EnumerateFileSystemEntries(current))
+                foreach (var entry in Directory.EnumerateFileSystemEntries(current))
                 {
-                    var candidateName = Path.GetFileName(candidate);
-                    if (string.Equals(candidateName, segment, StringComparison.Ordinal))
+                    var entryName = Path.GetFileName(entry);
+                    if (entryName.Equals(segment, StringComparison.Ordinal))
                     {
-                        exactMatch = candidate;
+                        exactMatch = entry;
                         break;
                     }
 
-                    if (string.Equals(candidateName, segment, StringComparison.OrdinalIgnoreCase))
+                    if (caseInsensitiveMatch is null &&
+                        entryName.Equals(segment, StringComparison.OrdinalIgnoreCase))
                     {
-                        caseInsensitiveMatchIsAmbiguous = caseInsensitiveMatch is not null;
-                        caseInsensitiveMatch ??= candidate;
+                        caseInsensitiveMatch = entry;
                     }
                 }
 
-                // More than one case-insensitive match is possible on a case-sensitive volume.
-                // Prefer an exact match regardless of enumeration order; otherwise require one unique match.
-                var matchingPath = exactMatch ??
-                    (caseInsensitiveMatchIsAmbiguous ? null : caseInsensitiveMatch);
-                if (matchingPath is null)
-                {
-                    return path;
-                }
-
-                current = matchingPath;
+                current = exactMatch ?? caseInsensitiveMatch ?? candidate;
             }
+            catch (IOException)
+            {
+                return path;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return path;
+            }
+        }
 
-            return current;
-        }
-        catch (IOException)
-        {
-            return path;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return path;
-        }
-        catch (ArgumentException)
-        {
-            return path;
-        }
-        catch (NotSupportedException)
-        {
-            return path;
-        }
+        return current;
     }
 
     /// <summary>

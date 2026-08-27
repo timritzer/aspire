@@ -224,26 +224,37 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
 
     private void SweepManagedSolutions(ILogger logger)
     {
-        var stateDirectory = GetStateDirectory();
-        string[] statePaths;
+        var now = _timeProvider.GetUtcNow();
+        SweepSolutionFiles(now, logger);
+        SweepOrphanedStateFiles(logger);
+    }
+
+    private void SweepSolutionFiles(DateTimeOffset now, ILogger logger)
+    {
+        string[] solutionPaths;
         try
         {
-            statePaths = Directory.GetFiles(stateDirectory, $"*{StateFileExtension}");
+            solutionPaths = Directory.GetFiles(
+                SolutionDirectory,
+                $"{SolutionFilePrefix}*{SolutionFileExtension}");
         }
-        catch (DirectoryNotFoundException)
+        catch (Exception ex) when (ex is DirectoryNotFoundException or IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            return;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-        {
-            logger.LogDebug(ex, "Failed to enumerate coordinated build solution state in '{Path}'.", stateDirectory);
+            logger.LogDebug(ex, "Failed to enumerate coordinated build solutions in '{Path}'.", SolutionDirectory);
             return;
         }
 
-        var now = _timeProvider.GetUtcNow();
-        foreach (var statePath in statePaths)
+        var inactiveState = now.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture);
+        foreach (var solutionPath in solutionPaths)
         {
-            var hash = Path.GetFileNameWithoutExtension(statePath);
+            var fileName = Path.GetFileName(solutionPath);
+            if (!fileName.StartsWith(SolutionFilePrefix, StringComparison.Ordinal) ||
+                !fileName.EndsWith(SolutionFileExtension, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var hash = fileName[SolutionFilePrefix.Length..^SolutionFileExtension.Length];
             if (!IsSolutionHash(hash))
             {
                 continue;
@@ -263,11 +274,12 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
                 continue;
             }
 
-            var solutionPath = GetSolutionPath(hash);
-            if (!File.Exists(solutionPath))
+            var statePath = GetStatePath(hash);
+            if (!File.Exists(statePath))
             {
-                TryDelete(statePath, logger, "Failed to delete orphaned coordinated build state file '{Path}'.");
-                TryDeleteEmptyDirectory(leaseDirectory, logger);
+                // A crash or failed state write can leave the atomically published solution behind.
+                // Start a full grace period once state storage is available instead of deleting it immediately.
+                TryWriteState(hash, inactiveState, logger);
                 continue;
             }
 
@@ -279,14 +291,14 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
 
             if (inactiveObservedUtc is null)
             {
-                TryWriteState(hash, now.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture), logger);
+                TryWriteState(hash, inactiveState, logger);
                 continue;
             }
 
             if (inactiveObservedUtc > now)
             {
                 // Wall clocks can move backwards. Start a fresh grace period instead of deleting early.
-                TryWriteState(hash, now.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture), logger);
+                TryWriteState(hash, inactiveState, logger);
                 continue;
             }
 
@@ -303,6 +315,56 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
                 TryDelete(statePath, logger, "Failed to delete coordinated build solution state file '{Path}'.");
                 TryDeleteEmptyDirectory(leaseDirectory, logger);
             }
+        }
+    }
+
+    private void SweepOrphanedStateFiles(ILogger logger)
+    {
+        var stateDirectory = GetStateDirectory();
+        string[] statePaths;
+        try
+        {
+            statePaths = Directory.GetFiles(stateDirectory, $"*{StateFileExtension}");
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            logger.LogDebug(ex, "Failed to enumerate coordinated build solution state in '{Path}'.", stateDirectory);
+            return;
+        }
+
+        foreach (var statePath in statePaths)
+        {
+            var hash = Path.GetFileNameWithoutExtension(statePath);
+            if (!IsSolutionHash(hash))
+            {
+                continue;
+            }
+
+            if (File.Exists(GetSolutionPath(hash)))
+            {
+                continue;
+            }
+
+            var leaseDirectory = GetLeaseDirectory(hash);
+            var leaseState = HeldFileLease.Probe(leaseDirectory, LeaseFileExtension);
+            if (leaseState is HeldFileLeaseProbeResult.Active)
+            {
+                TryWriteState(hash, ActiveState, logger);
+                continue;
+            }
+
+            if (leaseState is HeldFileLeaseProbeResult.Unknown)
+            {
+                logger.LogDebug("Retaining coordinated build state '{Hash}' because its lease state is unknown.", hash);
+                continue;
+            }
+
+            TryDelete(statePath, logger, "Failed to delete orphaned coordinated build state file '{Path}'.");
+            TryDeleteEmptyDirectory(leaseDirectory, logger);
         }
     }
 

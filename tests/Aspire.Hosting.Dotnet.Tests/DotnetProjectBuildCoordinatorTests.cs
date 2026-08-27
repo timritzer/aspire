@@ -8,6 +8,7 @@ using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Tests.Dcp;
 using Aspire.Hosting.Tests.Utils;
 using Aspire.Hosting.Utils;
+using Aspire.Shared;
 using Aspire.TestUtilities;
 using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.Extensions.DependencyInjection;
@@ -60,6 +61,31 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         AddExpectedDirectProjectSolutionIdentity(expected);
         AddExpectedConfiguration(builder, expected);
         Assert.Equal(expected, args);
+    }
+
+    [Fact]
+    public async Task ApplicationServiceProviderDisposesBuildResource()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Api", "Api.csproj");
+        builder.AddDotnetProject("api", projectPath, options => options.ExcludeLaunchProfile = true);
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        await using var app = builder.Build();
+
+        Assert.Same(buildResource, app.Services.GetRequiredService<DotnetProjectBuildResource>());
+        var solutionPath = await buildResource.WriteSolutionAsync(
+            NullLogger.Instance,
+            TestContext.Current.CancellationToken);
+        var hash = Path.GetFileNameWithoutExtension(solutionPath)["projects.".Length..];
+        var leaseDirectory = Path.Combine(buildResource.SolutionDirectory, ".leases", "v1", hash);
+        Assert.Equal(HeldFileLeaseProbeResult.Active, HeldFileLease.Probe(leaseDirectory, ".lease"));
+
+        await app.DisposeAsync();
+
+        Assert.Equal(HeldFileLeaseProbeResult.None, HeldFileLease.Probe(leaseDirectory, ".lease"));
     }
 
     [Theory]
@@ -413,7 +439,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
                 completionCts.Token);
 
             Assert.NotEqual(0, buildEvent.Snapshot.ExitCode);
-            Assert.NotEqual(KnownResourceStates.Finished, workerState);
+            Assert.Equal(KnownResourceStates.FailedToStart, workerState);
         }
 
         using var logsCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);

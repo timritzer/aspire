@@ -83,9 +83,13 @@ internal static class DotnetProjectBuildCoordinator
     {
         var buildResource = new DotnetProjectBuildResource(BuildResourceName, builder.AppHostDirectory, TimeProvider.System);
         buildResource.Annotations.Add(NameValidationPolicyAnnotation.None);
+        // A factory registration makes the service provider own and dispose this existing model resource.
+        // The instance registration overload would leave disposal with the caller.
+        builder.Services.AddSingleton(_ => buildResource);
         builder.Eventing.Subscribe<BeforeStartEvent>((@event, _) =>
         {
-            buildResource.RegisterForShutdown(@event.Services.GetRequiredService<IHostApplicationLifetime>());
+            var ownedBuildResource = @event.Services.GetRequiredService<DotnetProjectBuildResource>();
+            ownedBuildResource.RegisterForShutdown(@event.Services.GetRequiredService<IHostApplicationLifetime>());
             return Task.CompletedTask;
         });
 

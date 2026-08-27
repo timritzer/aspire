@@ -38,6 +38,39 @@ public class DotnetProjectBuildArtifactManagerTests(ITestOutputHelper outputHelp
     }
 
     [Fact]
+    public async Task SolutionWithoutStateStartsFreshGracePeriodBeforePruning()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var timeProvider = new FakeTimeProvider(s_startTime);
+        var solutionDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        const string inactiveHash = "aaaaaaaaaaaa";
+        string inactiveSolutionPath;
+        string inactiveStatePath;
+
+        using (var firstManager = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider))
+        {
+            inactiveSolutionPath = await PublishAsync(firstManager, inactiveHash);
+            inactiveStatePath = firstManager.GetStatePath(inactiveHash);
+        }
+
+        Directory.Delete(Path.Combine(solutionDirectory, ".artifacts"), recursive: true);
+
+        using var sweeper = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
+        await PublishAsync(sweeper, "bbbbbbbbbbbb");
+        Assert.True(File.Exists(inactiveSolutionPath));
+        Assert.True(File.Exists(inactiveStatePath));
+
+        timeProvider.Advance(DotnetProjectBuildArtifactManager.InactiveRetentionPeriod - TimeSpan.FromMinutes(1));
+        await PublishAsync(sweeper, "bbbbbbbbbbbb");
+        Assert.True(File.Exists(inactiveSolutionPath));
+
+        timeProvider.Advance(TimeSpan.FromMinutes(2));
+        await PublishAsync(sweeper, "bbbbbbbbbbbb");
+        Assert.False(File.Exists(inactiveSolutionPath));
+        Assert.False(File.Exists(inactiveStatePath));
+    }
+
+    [Fact]
     public async Task SharedSolutionRemainsUntilEveryLeaseEndsAndThenStartsFreshGracePeriod()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
