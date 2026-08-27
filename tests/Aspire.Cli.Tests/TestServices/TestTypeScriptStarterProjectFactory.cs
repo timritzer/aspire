@@ -54,6 +54,7 @@ internal sealed class TestTypeScriptStarterProject(Func<DirectoryInfo, Cancellat
     public string DisplayName => "TypeScript (Node.js)";
 
     public bool RequiresStopForAddPackage => false;
+    public bool SupportsLaunchProfiles => false;
 
     public string? AppHostFileName => "apphost.mts";
 

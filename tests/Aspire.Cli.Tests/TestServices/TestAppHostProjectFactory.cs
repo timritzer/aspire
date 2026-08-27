@@ -47,6 +47,7 @@ internal sealed class TestAppHostProjectFactory : IAppHostProjectFactory
     public string DisplayName { get; set; } = "C# (.NET)";
 
     public bool RequiresStopForAddPackage { get; set; }
+    public bool SupportsLaunchProfiles { get; set; } = true;
 
     /// <summary>
     /// Optional detection patterns to advertise from the test project.
@@ -157,6 +158,7 @@ internal sealed class TestAppHostProjectFactory : IAppHostProjectFactory
         public string LanguageId => _factory.LanguageId;
         public string DisplayName => _factory.DisplayName;
         public bool RequiresStopForAddPackage => _factory.RequiresStopForAddPackage;
+        public bool SupportsLaunchProfiles => _factory.SupportsLaunchProfiles;
         public string? AppHostFileName => "AppHost.csproj";
 
         public bool IsUsingProjectReferences(FileInfo appHostFile)

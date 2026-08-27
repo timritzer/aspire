@@ -33,10 +33,10 @@ internal static class PathNormalizer
     /// links and macOS APFS firmlinks.
     /// </summary>
     /// <remarks>
-    /// Use this when the path needs to match what MSBuild reports for the same file.
-    /// MSBuild always uses the true filesystem casing; a user who types
+    /// Use this when aliases on a case-insensitive filesystem must produce the same identity while
+    /// preserving distinct paths on case-sensitive macOS volumes. A user who types
     /// <c>--apphost c:\FOO\bar.csproj</c> will get back <c>C:\foo\bar.csproj</c>
-    /// if that is the on-disk casing, making the hash agree with the AppHost side.
+    /// if that is the on-disk casing.
     /// </remarks>
     /// <param name="path">An absolute path to a file that exists on disk.</param>
     /// <returns>
@@ -45,108 +45,69 @@ internal static class PathNormalizer
     /// </returns>
     public static string ResolveToFilesystemPath(string path)
     {
-        if (!OperatingSystem.IsWindows())
+        var resolvedPath = ResolveSymlinks(path);
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS())
         {
-            return ResolveSymlinks(path);
+            return resolvedPath;
         }
 
-        // Only handle standard drive-letter paths (e.g. C:\...).
-        // UNC paths (\\server\share\...) are not common for project files and are left unchanged.
-        if (path.Length < 3 || path[1] != ':' || path[2] != Path.DirectorySeparatorChar)
+        var root = Path.GetPathRoot(resolvedPath);
+        if (string.IsNullOrEmpty(root))
         {
-            return path;
+            return resolvedPath;
         }
 
-        // Uppercase the drive letter and use it as the starting root (e.g. "C:\").
-        var current = char.ToUpperInvariant(path[0]) + ":" + Path.DirectorySeparatorChar;
+        var segments = resolvedPath[root.Length..].Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
 
-        // Walk each component after the root ("X:\") to resolve its real casing.
-        var parts = path[3..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
-
-        for (var i = 0; i < parts.Length; i++)
+        // Windows APIs preserve the caller's drive-letter casing even while directory enumeration
+        // recovers every later component. Normalize the drive root so c:\foo and C:\foo produce
+        // the same canonical path and callers receive the conventional on-disk form.
+        var current = OperatingSystem.IsWindows() && root.Length >= 2 && root[1] == ':'
+            ? $"{char.ToUpperInvariant(root[0])}{root[1..]}"
+            : root;
+        foreach (var segment in segments)
         {
-            if (i == parts.Length - 1)
+            var candidate = Path.Combine(current, segment);
+            if (!File.Exists(candidate) && !Directory.Exists(candidate))
             {
-                // Final component: find the file with its real name.
-                return TryGetSingleFile(current, parts[i], out var resolvedFile) ? resolvedFile : Path.Combine(current, parts[i]);
+                return resolvedPath;
             }
 
-            // Intermediate component: find the directory with its real name.
-            if (!TryGetSingleDirectory(current, parts[i], out var resolvedDirectory))
-            {
-                current = Path.Combine(current, parts[i]);
-                return CombineRemaining(current, parts, i + 1);
-            }
-
-            current = resolvedDirectory;
-
-            if (!current.EndsWith(Path.DirectorySeparatorChar))
-            {
-                current += Path.DirectorySeparatorChar;
-            }
-        }
-
-        return path;
-
-        static bool TryGetSingleFile(string directory, string searchPattern, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? resolvedFile)
-        {
             try
             {
-                var files = Directory.GetFiles(directory, searchPattern);
-                resolvedFile = files.Length == 1 ? files[0] : null;
-                return resolvedFile is not null;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                resolvedFile = null;
-                return false;
+                string? exactMatch = null;
+                string? caseInsensitiveMatch = null;
+                foreach (var entry in Directory.EnumerateFileSystemEntries(current))
+                {
+                    var entryName = Path.GetFileName(entry);
+                    if (entryName.Equals(segment, StringComparison.Ordinal))
+                    {
+                        exactMatch = entry;
+                        break;
+                    }
+
+                    if (caseInsensitiveMatch is null &&
+                        entryName.Equals(segment, StringComparison.OrdinalIgnoreCase))
+                    {
+                        caseInsensitiveMatch = entry;
+                    }
+                }
+
+                current = exactMatch ?? caseInsensitiveMatch ?? candidate;
             }
             catch (IOException)
             {
-                resolvedFile = null;
-                return false;
+                return resolvedPath;
             }
             catch (UnauthorizedAccessException)
             {
-                resolvedFile = null;
-                return false;
+                return resolvedPath;
             }
         }
 
-        static bool TryGetSingleDirectory(string directory, string searchPattern, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? resolvedDirectory)
-        {
-            try
-            {
-                var dirs = Directory.GetDirectories(directory, searchPattern);
-                resolvedDirectory = dirs.Length == 1 ? dirs[0] : null;
-                return resolvedDirectory is not null;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                resolvedDirectory = null;
-                return false;
-            }
-            catch (IOException)
-            {
-                resolvedDirectory = null;
-                return false;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                resolvedDirectory = null;
-                return false;
-            }
-        }
-
-        static string CombineRemaining(string current, string[] segments, int startIndex)
-        {
-            for (var j = startIndex; j < segments.Length; j++)
-            {
-                current = Path.Combine(current, segments[j]);
-            }
-
-            return current;
-        }
+        return current;
     }
 
     /// <summary>
@@ -169,6 +130,22 @@ internal static class PathNormalizer
     public static string ResolveSymlinks(string path)
     {
         return ResolveSymlinksCore(path, depth: 0);
+    }
+
+    /// <summary>
+    /// Attempts to resolve symbolic links along every segment of <paramref name="path"/>.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="ResolveSymlinks"/>, this method reports IO, permission, and circular-link failures
+    /// instead of returning a partially canonicalized path. An ordinary missing segment that is not observable
+    /// as a symbolic link remains lexical; callers must still account for filesystem changes after validation.
+    /// </remarks>
+    /// <param name="path">The path to canonicalize.</param>
+    /// <param name="resolvedPath">The canonical path when the method returns <see langword="true"/>.</param>
+    /// <returns><see langword="true"/> when every observable symbolic link was resolved; otherwise, <see langword="false"/>.</returns>
+    public static bool TryResolveSymlinks(string path, out string resolvedPath)
+    {
+        return TryResolveSymlinksCore(path, depth: 0, out resolvedPath);
     }
 
     // Hard depth limit on recursive canonicalization to defend against pathological
@@ -260,6 +237,82 @@ internal static class PathNormalizer
             }
 
             return current;
+        }
+    }
+
+    private static bool TryResolveSymlinksCore(string path, int depth, out string resolvedPath)
+    {
+        resolvedPath = path;
+
+        if (string.IsNullOrEmpty(path))
+        {
+            return true;
+        }
+
+        if (depth > MaxResolveSymlinksDepth)
+        {
+            return false;
+        }
+
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var root = Path.GetPathRoot(fullPath);
+            if (string.IsNullOrEmpty(root))
+            {
+                resolvedPath = fullPath;
+                return true;
+            }
+
+            var relative = fullPath[root.Length..];
+            var segments = relative.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+
+            var current = root;
+            for (var i = 0; i < segments.Length; i++)
+            {
+                current = Path.Combine(current, segments[i]);
+
+                var storedLinkTarget = new FileInfo(current).LinkTarget ?? new DirectoryInfo(current).LinkTarget;
+                if (storedLinkTarget is null && !File.Exists(current) && !Directory.Exists(current))
+                {
+                    try
+                    {
+                        _ = File.GetAttributes(current);
+                    }
+                    catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+                    {
+                        for (var j = i + 1; j < segments.Length; j++)
+                        {
+                            current = Path.Combine(current, segments[j]);
+                        }
+
+                        resolvedPath = current;
+                        return true;
+                    }
+                }
+
+                var linkTarget = i < segments.Length - 1
+                    ? Directory.ResolveLinkTarget(current, returnFinalTarget: true)
+                    : File.ResolveLinkTarget(current, returnFinalTarget: true)
+                      ?? Directory.ResolveLinkTarget(current, returnFinalTarget: true);
+
+                if (linkTarget?.FullName is { Length: > 0 } resolved)
+                {
+                    if (!TryResolveSymlinksCore(resolved, depth + 1, out current))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            resolvedPath = current;
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 }

@@ -175,6 +175,11 @@ internal interface IAppHostProject
     bool RequiresStopForAddPackage { get; }
 
     /// <summary>
+    /// Gets whether this project type supports selecting a launch profile explicitly.
+    /// </summary>
+    bool SupportsLaunchProfiles { get; }
+
+    /// <summary>
     /// Gets the file patterns to search for when detecting apphosts.
     /// Examples: ["*.csproj", "*.fsproj", "apphost.cs"] or ["apphost.ts"]
     /// </summary>
