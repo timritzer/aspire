@@ -11,93 +11,93 @@ public class DotnetProjectBuildArtifactManagerTests(ITestOutputHelper outputHelp
     private static readonly DateTimeOffset s_startTime = new(2026, 8, 26, 0, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task InactiveSolutionIsPrunedOnlyAfterGracePeriod()
+    public async Task InactiveBuildProjectIsPrunedOnlyAfterGracePeriod()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var timeProvider = new FakeTimeProvider(s_startTime);
-        var solutionDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
         var inactiveHash = "aaaaaaaaaaaa";
-        string inactiveSolutionPath;
+        string inactiveBuildProjectPath;
 
-        using (var firstManager = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider))
+        using (var firstManager = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider))
         {
-            inactiveSolutionPath = await PublishAsync(firstManager, inactiveHash);
+            inactiveBuildProjectPath = await PublishAsync(firstManager, inactiveHash);
         }
 
-        using var sweeper = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
+        using var sweeper = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
         await PublishAsync(sweeper, "bbbbbbbbbbbb");
-        Assert.True(File.Exists(inactiveSolutionPath));
+        Assert.True(File.Exists(inactiveBuildProjectPath));
 
         timeProvider.Advance(DotnetProjectBuildArtifactManager.InactiveRetentionPeriod - TimeSpan.FromMinutes(1));
         await PublishAsync(sweeper, "bbbbbbbbbbbb");
-        Assert.True(File.Exists(inactiveSolutionPath));
+        Assert.True(File.Exists(inactiveBuildProjectPath));
 
         timeProvider.Advance(TimeSpan.FromMinutes(2));
         await PublishAsync(sweeper, "bbbbbbbbbbbb");
-        Assert.False(File.Exists(inactiveSolutionPath));
+        Assert.False(File.Exists(inactiveBuildProjectPath));
     }
 
     [Fact]
-    public async Task SolutionWithoutStateStartsFreshGracePeriodBeforePruning()
+    public async Task BuildProjectWithoutStateStartsFreshGracePeriodBeforePruning()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var timeProvider = new FakeTimeProvider(s_startTime);
-        var solutionDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
         const string inactiveHash = "aaaaaaaaaaaa";
-        string inactiveSolutionPath;
+        string inactiveBuildProjectPath;
         string inactiveStatePath;
 
-        using (var firstManager = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider))
+        using (var firstManager = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider))
         {
-            inactiveSolutionPath = await PublishAsync(firstManager, inactiveHash);
+            inactiveBuildProjectPath = await PublishAsync(firstManager, inactiveHash);
             inactiveStatePath = firstManager.GetStatePath(inactiveHash);
         }
 
-        Directory.Delete(Path.Combine(solutionDirectory, ".artifacts"), recursive: true);
+        Directory.Delete(Path.Combine(buildDirectory, ".artifacts"), recursive: true);
 
-        using var sweeper = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
+        using var sweeper = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
         await PublishAsync(sweeper, "bbbbbbbbbbbb");
-        Assert.True(File.Exists(inactiveSolutionPath));
+        Assert.True(File.Exists(inactiveBuildProjectPath));
         Assert.True(File.Exists(inactiveStatePath));
 
         timeProvider.Advance(DotnetProjectBuildArtifactManager.InactiveRetentionPeriod - TimeSpan.FromMinutes(1));
         await PublishAsync(sweeper, "bbbbbbbbbbbb");
-        Assert.True(File.Exists(inactiveSolutionPath));
+        Assert.True(File.Exists(inactiveBuildProjectPath));
 
         timeProvider.Advance(TimeSpan.FromMinutes(2));
         await PublishAsync(sweeper, "bbbbbbbbbbbb");
-        Assert.False(File.Exists(inactiveSolutionPath));
+        Assert.False(File.Exists(inactiveBuildProjectPath));
         Assert.False(File.Exists(inactiveStatePath));
     }
 
     [Fact]
-    public async Task SharedSolutionRemainsUntilEveryLeaseEndsAndThenStartsFreshGracePeriod()
+    public async Task SharedBuildProjectRemainsUntilEveryLeaseEndsAndThenStartsFreshGracePeriod()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var timeProvider = new FakeTimeProvider(s_startTime);
-        var solutionDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
         var sharedHash = "aaaaaaaaaaaa";
-        var firstManager = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
-        var secondManager = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
-        using var sweeper = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
+        var firstManager = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
+        var secondManager = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
+        using var sweeper = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
 
         try
         {
-            var sharedSolutionPath = await PublishAsync(firstManager, sharedHash);
-            Assert.Equal(sharedSolutionPath, await PublishAsync(secondManager, sharedHash));
+            var sharedBuildProjectPath = await PublishAsync(firstManager, sharedHash);
+            Assert.Equal(sharedBuildProjectPath, await PublishAsync(secondManager, sharedHash));
 
             firstManager.Dispose();
             timeProvider.Advance(DotnetProjectBuildArtifactManager.InactiveRetentionPeriod + TimeSpan.FromDays(2));
             await PublishAsync(sweeper, "bbbbbbbbbbbb");
-            Assert.True(File.Exists(sharedSolutionPath));
+            Assert.True(File.Exists(sharedBuildProjectPath));
 
             secondManager.Dispose();
             await PublishAsync(sweeper, "bbbbbbbbbbbb");
-            Assert.True(File.Exists(sharedSolutionPath));
+            Assert.True(File.Exists(sharedBuildProjectPath));
 
             timeProvider.Advance(DotnetProjectBuildArtifactManager.InactiveRetentionPeriod + TimeSpan.FromMinutes(1));
             await PublishAsync(sweeper, "bbbbbbbbbbbb");
-            Assert.False(File.Exists(sharedSolutionPath));
+            Assert.False(File.Exists(sharedBuildProjectPath));
         }
         finally
         {
@@ -107,43 +107,43 @@ public class DotnetProjectBuildArtifactManagerTests(ITestOutputHelper outputHelp
     }
 
     [Fact]
-    public async Task InvalidStateRetainsSolution()
+    public async Task InvalidStateRetainsBuildProject()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var timeProvider = new FakeTimeProvider(s_startTime);
-        var solutionDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
         var hash = "aaaaaaaaaaaa";
-        string solutionPath;
+        string buildProjectPath;
         string statePath;
 
-        using (var firstManager = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider))
+        using (var firstManager = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider))
         {
-            solutionPath = await PublishAsync(firstManager, hash);
+            buildProjectPath = await PublishAsync(firstManager, hash);
             statePath = firstManager.GetStatePath(hash);
         }
 
         File.WriteAllText(statePath, "future-schema");
         timeProvider.Advance(DotnetProjectBuildArtifactManager.InactiveRetentionPeriod + TimeSpan.FromDays(2));
 
-        using var sweeper = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
+        using var sweeper = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
         await PublishAsync(sweeper, "bbbbbbbbbbbb");
 
-        Assert.True(File.Exists(solutionPath));
+        Assert.True(File.Exists(buildProjectPath));
         Assert.Equal("future-schema", File.ReadAllText(statePath));
     }
 
     [Fact]
-    public async Task MissingSolutionIsRegeneratedWhileLeaseIsHeld()
+    public async Task MissingBuildProjectIsRegeneratedWhileLeaseIsHeld()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        var solutionDirectory = Path.Combine(workspace.Path, ".aspire", "build");
-        using var manager = new DotnetProjectBuildArtifactManager(solutionDirectory, TimeProvider.System);
+        var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        using var manager = new DotnetProjectBuildArtifactManager(buildDirectory, TimeProvider.System);
 
-        var solutionPath = await PublishAsync(manager, "aaaaaaaaaaaa");
-        File.Delete(solutionPath);
+        var buildProjectPath = await PublishAsync(manager, "aaaaaaaaaaaa");
+        File.Delete(buildProjectPath);
 
-        Assert.Equal(solutionPath, await PublishAsync(manager, "aaaaaaaaaaaa"));
-        Assert.True(File.Exists(solutionPath));
+        Assert.Equal(buildProjectPath, await PublishAsync(manager, "aaaaaaaaaaaa"));
+        Assert.True(File.Exists(buildProjectPath));
     }
 
     [Fact]
@@ -175,10 +175,10 @@ public class DotnetProjectBuildArtifactManagerTests(ITestOutputHelper outputHelp
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var timeProvider = new FakeTimeProvider(s_startTime);
-        var solutionDirectory = Path.Combine(workspace.Path, ".aspire", "build");
-        Directory.CreateDirectory(solutionDirectory);
-        var oldTemporaryPath = Path.Combine(solutionDirectory, ".old.tmp");
-        var recentTemporaryPath = Path.Combine(solutionDirectory, ".recent.tmp");
+        var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        Directory.CreateDirectory(buildDirectory);
+        var oldTemporaryPath = Path.Combine(buildDirectory, ".old.tmp");
+        var recentTemporaryPath = Path.Combine(buildDirectory, ".recent.tmp");
         File.WriteAllText(oldTemporaryPath, "old");
         File.WriteAllText(recentTemporaryPath, "recent");
         File.SetLastWriteTimeUtc(
@@ -186,7 +186,7 @@ public class DotnetProjectBuildArtifactManagerTests(ITestOutputHelper outputHelp
             (s_startTime - DotnetProjectBuildArtifactManager.TemporaryFileRetentionPeriod - TimeSpan.FromMinutes(1)).UtcDateTime);
         File.SetLastWriteTimeUtc(recentTemporaryPath, s_startTime.UtcDateTime);
 
-        using var manager = new DotnetProjectBuildArtifactManager(solutionDirectory, timeProvider);
+        using var manager = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
         await PublishAsync(manager, "aaaaaaaaaaaa");
 
         Assert.False(File.Exists(oldTemporaryPath));

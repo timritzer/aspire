@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Runtime.Versioning;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using Aspire.Cli.Agents;
@@ -226,6 +227,117 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
 
         Assert.Equal(CliExitCodes.Success, exitCode);
         Assert.Equal(existingContent, await File.ReadAllTextAsync(gitIgnorePath));
+    }
+
+    [Fact]
+    public async Task InitCommand_SingleFileSkeleton_UpdatesGitIgnoreAtomicallyAndPreservesFileMode()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+
+        var gitIgnorePath = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        const string existingContent = "# Keep this comment\ncustom/\n";
+        await File.WriteAllTextAsync(gitIgnorePath, existingContent);
+        UnixFileMode? expectedMode = null;
+        if (!OperatingSystem.IsWindows())
+        {
+            expectedMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead;
+            File.SetUnixFileMode(gitIgnorePath, expectedMode.Value);
+        }
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+
+        var exitCode = await initCommand.Parse("init --suppress-agent-init").InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.Equal($"{existingContent}.aspire/\n", await File.ReadAllTextAsync(gitIgnorePath));
+        Assert.Empty(Directory.GetFiles(workspace.WorkspaceRoot.FullName, ".gitignore.tmp-*"));
+        if (!OperatingSystem.IsWindows() && expectedMode is not null)
+        {
+            Assert.Equal(expectedMode, File.GetUnixFileMode(gitIgnorePath));
+        }
+    }
+
+    [Fact]
+    public async Task WriteAllTextAtomicallyAsync_CancellationPreservesExistingFile()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var path = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        await File.WriteAllTextAsync(path, "keep-me\n");
+        using var cancellationTokenSource = new CancellationTokenSource();
+        cancellationTokenSource.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => InitCommand.WriteAllTextAtomicallyAsync(
+                path,
+                new string('x', 64 * 1024),
+                cancellationTokenSource.Token));
+
+        Assert.Equal("keep-me\n", await File.ReadAllTextAsync(path));
+        Assert.Empty(Directory.GetFiles(workspace.WorkspaceRoot.FullName, ".gitignore.tmp-*"));
+    }
+
+    [Fact]
+    public async Task InitCommand_SingleFileSkeleton_UpdatesGitIgnoreSymlinkTarget()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var targetDirectory = workspace.WorkspaceRoot.CreateSubdirectory("config");
+        var targetPath = Path.Combine(targetDirectory.FullName, "shared.gitignore");
+        await File.WriteAllTextAsync(targetPath, "custom/\n");
+        var gitIgnorePath = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        try
+        {
+            File.CreateSymbolicLink(gitIgnorePath, targetPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            Assert.Skip($"Cannot create symbolic links in this environment: {ex.Message}");
+        }
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+
+        var exitCode = await initCommand.Parse("init --suppress-agent-init").InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.NotNull(new FileInfo(gitIgnorePath).LinkTarget);
+        Assert.Equal("custom/\n.aspire/\n", await File.ReadAllTextAsync(targetPath));
+        Assert.Empty(Directory.GetFiles(targetDirectory.FullName, "shared.gitignore.tmp-*"));
+    }
+
+    [Fact]
+    [UnsupportedOSPlatform("windows")]
+    public async Task WriteAllTextAtomicallyAsync_RefusesReadOnlyUnixFile()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Unix file modes are required for this test.");
+        }
+
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var path = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        await File.WriteAllTextAsync(path, "keep-me\n");
+        File.SetUnixFileMode(
+            path,
+            UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+        try
+        {
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(
+                () => InitCommand.WriteAllTextAtomicallyAsync(
+                    path,
+                    "replacement\n",
+                    TestContext.Current.CancellationToken));
+
+            Assert.Equal("keep-me\n", await File.ReadAllTextAsync(path));
+            Assert.Empty(Directory.GetFiles(workspace.WorkspaceRoot.FullName, ".gitignore.tmp-*"));
+        }
+        finally
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
     }
 
     [Fact]

@@ -28,8 +28,8 @@ internal static class PathNormalizer
     }
 
     /// <summary>
-    /// On Windows and macOS, resolves a path to its filesystem-canonical form by querying the OS
-    /// for the actual casing of each path component. On Linux this is a no-op.
+    /// Resolves a path to its filesystem-canonical form by querying the OS for the actual casing
+    /// of each path component.
     /// </summary>
     /// <remarks>
     /// Use this when aliases on a case-insensitive filesystem must produce the same identity while
@@ -44,11 +44,6 @@ internal static class PathNormalizer
     /// </returns>
     public static string ResolveToFilesystemPath(string path)
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS())
-        {
-            return path;
-        }
-
         var root = Path.GetPathRoot(path);
         if (string.IsNullOrEmpty(root))
         {

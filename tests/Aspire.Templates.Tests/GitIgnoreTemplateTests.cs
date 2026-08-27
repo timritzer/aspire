@@ -7,9 +7,6 @@ namespace Aspire.Templates.Tests;
 
 public class GitIgnoreTemplateTests(ITestOutputHelper testOutput) : TemplateTestsBase(testOutput)
 {
-    private static readonly Lazy<BuildEnvironment> s_templateCreationEnvironment = new(
-        static () => new BuildEnvironment(useSystemDotNet: true));
-
     [Theory]
     [InlineData("aspire-starter", "aspire-starter", "--skipRestore")]
     [InlineData("aspire-empty", "aspire", "--no-restore")]
@@ -20,7 +17,7 @@ public class GitIgnoreTemplateTests(ITestOutputHelper testOutput) : TemplateTest
     {
         var projectName = GetNewProjectId(prefix: $"gitignore_{templateDirectory}");
         var outputPath = Path.Combine(BuildEnvironment.TestRootPath, projectName);
-        var buildEnvironment = s_templateCreationEnvironment.Value;
+        var buildEnvironment = BuildEnvironment.ForDefaultFramework;
 
         using var command = new DotNetNewCommand(
             _testOutput,

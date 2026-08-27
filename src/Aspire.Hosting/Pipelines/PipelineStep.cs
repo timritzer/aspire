@@ -17,6 +17,8 @@ namespace Aspire.Hosting.Pipelines;
 [AspireExport(ExposeProperties = true)]
 public class PipelineStep
 {
+    private Func<PipelineStepContext, Task>? _finalAction;
+
     /// <summary>
     /// Gets or initializes the unique name of the step.
     /// </summary>
@@ -35,6 +37,8 @@ public class PipelineStep
     /// Gets or initializes the action to execute for this step.
     /// </summary>
     public required Func<PipelineStepContext, Task> Action { get; init; }
+
+    internal Func<PipelineStepContext, Task>? FinalAction => _finalAction;
 
     /// <summary>
     /// Gets or initializes the list of step names that this step depends on.
@@ -117,7 +121,7 @@ public class PipelineStep
     /// </summary>
     internal PipelineStep Clone()
     {
-        return new PipelineStep
+        var clone = new PipelineStep
         {
             Name = Name,
             Description = Description,
@@ -127,6 +131,19 @@ public class PipelineStep
             Tags = [.. Tags],
             Resource = Resource,
         };
+        clone._finalAction = _finalAction;
+        return clone;
+    }
+
+    internal void SetFinalAction(Func<PipelineStepContext, Task> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (_finalAction is not null)
+        {
+            throw new InvalidOperationException($"A final action is already configured for pipeline step '{Name}'.");
+        }
+
+        _finalAction = action;
     }
 
     private string DebuggerToString()

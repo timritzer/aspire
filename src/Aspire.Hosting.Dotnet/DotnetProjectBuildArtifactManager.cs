@@ -10,8 +10,8 @@ namespace Aspire.Hosting.Dotnet;
 
 internal sealed class DotnetProjectBuildArtifactManager : IDisposable
 {
-    private const string SolutionFilePrefix = "projects.";
-    private const string SolutionFileExtension = ".slnx";
+    private const string BuildProjectFilePrefix = "projects.";
+    private const string BuildProjectFileExtension = ".proj";
     private const string LeaseFileExtension = ".lease";
     private const string StateFileExtension = ".state";
     private const string ActiveState = "0";
@@ -26,16 +26,16 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
     private bool _stopping;
     private bool _disposed;
 
-    public DotnetProjectBuildArtifactManager(string solutionDirectory, TimeProvider timeProvider)
+    public DotnetProjectBuildArtifactManager(string buildDirectory, TimeProvider timeProvider)
     {
-        ArgumentException.ThrowIfNullOrEmpty(solutionDirectory);
+        ArgumentException.ThrowIfNullOrEmpty(buildDirectory);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
-        SolutionDirectory = solutionDirectory;
+        BuildDirectory = buildDirectory;
         _timeProvider = timeProvider;
     }
 
-    public string SolutionDirectory { get; }
+    public string BuildDirectory { get; }
 
     internal static TimeSpan InactiveRetentionPeriod => s_inactiveRetentionPeriod;
 
@@ -43,24 +43,24 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
 
     public async Task<string> PublishAndLeaseAsync(
         string hash,
-        byte[] solutionBytes,
+        byte[] buildProjectBytes,
         ILogger logger,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(hash);
-        ArgumentNullException.ThrowIfNull(solutionBytes);
+        ArgumentNullException.ThrowIfNull(buildProjectBytes);
         ArgumentNullException.ThrowIfNull(logger);
 
-        Directory.CreateDirectory(SolutionDirectory);
-        var coordinationLockPath = Path.Combine(SolutionDirectory, ".coordination.lock");
+        Directory.CreateDirectory(BuildDirectory);
+        var coordinationLockPath = Path.Combine(BuildDirectory, ".coordination.lock");
         using var coordinationLock = await FileLock.AcquireAsync(coordinationLockPath, cancellationToken).ConfigureAwait(false);
 
         TryCreateGitIgnore(logger);
 
-        var solutionPath = GetSolutionPath(hash);
-        if (!File.Exists(solutionPath))
+        var buildProjectPath = GetBuildProjectPath(hash);
+        if (!File.Exists(buildProjectPath))
         {
-            await PublishSolutionAsync(solutionPath, solutionBytes, logger, cancellationToken).ConfigureAwait(false);
+            await PublishBuildProjectAsync(buildProjectPath, buildProjectBytes, logger, cancellationToken).ConfigureAwait(false);
         }
 
         lock (_lock)
@@ -82,7 +82,7 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
             try
             {
                 // Reset the inactivity clock while holding the same cross-process lock used by the sweeper.
-                // If this write fails, fail the build rather than returning a solution that another AppHost
+                // If this write fails, fail the build rather than returning an artifact that another AppHost
                 // could later mistake for continuously inactive.
                 WriteState(hash, ActiveState);
             }
@@ -97,11 +97,11 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
                 throw;
             }
 
-            SweepManagedSolutions(logger);
+            SweepManagedBuildProjects(logger);
             SweepTemporaryFiles(logger);
         }
 
-        return solutionPath;
+        return buildProjectPath;
     }
 
     public void RegisterForShutdown(IHostApplicationLifetime applicationLifetime)
@@ -162,29 +162,29 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
         registration.Dispose();
     }
 
-    internal string GetSolutionPath(string hash) =>
-        Path.Combine(SolutionDirectory, $"{SolutionFilePrefix}{hash}{SolutionFileExtension}");
+    internal string GetBuildProjectPath(string hash) =>
+        Path.Combine(BuildDirectory, $"{BuildProjectFilePrefix}{hash}{BuildProjectFileExtension}");
 
     internal string GetStatePath(string hash) =>
         Path.Combine(GetStateDirectory(), $"{hash}{StateFileExtension}");
 
-    private async Task PublishSolutionAsync(
-        string solutionPath,
-        byte[] solutionBytes,
+    private async Task PublishBuildProjectAsync(
+        string buildProjectPath,
+        byte[] buildProjectBytes,
         ILogger logger,
         CancellationToken cancellationToken)
     {
         // Different AppHost entry points and launches that bypass the CLI's single-instance handling
-        // can share this directory. Publish atomically so no build observes a partial solution.
-        var temporaryPath = Path.Combine(SolutionDirectory, $".{Path.GetRandomFileName()}.tmp");
+        // can share this directory. Publish atomically so no build observes a partial project.
+        var temporaryPath = Path.Combine(BuildDirectory, $".{Path.GetRandomFileName()}.tmp");
         try
         {
-            await File.WriteAllBytesAsync(temporaryPath, solutionBytes, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(temporaryPath, buildProjectBytes, cancellationToken).ConfigureAwait(false);
             try
             {
-                File.Move(temporaryPath, solutionPath);
+                File.Move(temporaryPath, buildProjectPath);
             }
-            catch (IOException) when (File.Exists(solutionPath))
+            catch (IOException) when (File.Exists(buildProjectPath))
             {
                 // Another AppHost instance published the same content first.
             }
@@ -194,13 +194,13 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
             TryDelete(
                 temporaryPath,
                 logger,
-                "Failed to delete temporary coordinated build solution file '{Path}'.");
+                "Failed to delete temporary coordinated build project '{Path}'.");
         }
     }
 
     private void TryCreateGitIgnore(ILogger logger)
     {
-        var gitIgnorePath = Path.Combine(SolutionDirectory, ".gitignore");
+        var gitIgnorePath = Path.Combine(BuildDirectory, ".gitignore");
         try
         {
             using var stream = new FileStream(
@@ -218,44 +218,44 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            logger.LogDebug(ex, "Failed to create generated-solution ignore file '{Path}'.", gitIgnorePath);
+            logger.LogDebug(ex, "Failed to create generated-build ignore file '{Path}'.", gitIgnorePath);
         }
     }
 
-    private void SweepManagedSolutions(ILogger logger)
+    private void SweepManagedBuildProjects(ILogger logger)
     {
         var now = _timeProvider.GetUtcNow();
-        SweepSolutionFiles(now, logger);
+        SweepBuildProjectFiles(now, logger);
         SweepOrphanedStateFiles(logger);
     }
 
-    private void SweepSolutionFiles(DateTimeOffset now, ILogger logger)
+    private void SweepBuildProjectFiles(DateTimeOffset now, ILogger logger)
     {
-        string[] solutionPaths;
+        string[] buildProjectPaths;
         try
         {
-            solutionPaths = Directory.GetFiles(
-                SolutionDirectory,
-                $"{SolutionFilePrefix}*{SolutionFileExtension}");
+            buildProjectPaths = Directory.GetFiles(
+                BuildDirectory,
+                $"{BuildProjectFilePrefix}*{BuildProjectFileExtension}");
         }
         catch (Exception ex) when (ex is DirectoryNotFoundException or IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            logger.LogDebug(ex, "Failed to enumerate coordinated build solutions in '{Path}'.", SolutionDirectory);
+            logger.LogDebug(ex, "Failed to enumerate coordinated build projects in '{Path}'.", BuildDirectory);
             return;
         }
 
         var inactiveState = now.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture);
-        foreach (var solutionPath in solutionPaths)
+        foreach (var buildProjectPath in buildProjectPaths)
         {
-            var fileName = Path.GetFileName(solutionPath);
-            if (!fileName.StartsWith(SolutionFilePrefix, StringComparison.Ordinal) ||
-                !fileName.EndsWith(SolutionFileExtension, StringComparison.Ordinal))
+            var fileName = Path.GetFileName(buildProjectPath);
+            if (!fileName.StartsWith(BuildProjectFilePrefix, StringComparison.Ordinal) ||
+                !fileName.EndsWith(BuildProjectFileExtension, StringComparison.Ordinal))
             {
                 continue;
             }
 
-            var hash = fileName[SolutionFilePrefix.Length..^SolutionFileExtension.Length];
-            if (!IsSolutionHash(hash))
+            var hash = fileName[BuildProjectFilePrefix.Length..^BuildProjectFileExtension.Length];
+            if (!IsBuildProjectHash(hash))
             {
                 continue;
             }
@@ -270,14 +270,14 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
 
             if (leaseState is HeldFileLeaseProbeResult.Unknown)
             {
-                logger.LogDebug("Retaining coordinated build solution '{Hash}' because its lease state is unknown.", hash);
+                logger.LogDebug("Retaining coordinated build project '{Hash}' because its lease state is unknown.", hash);
                 continue;
             }
 
             var statePath = GetStatePath(hash);
             if (!File.Exists(statePath))
             {
-                // A crash or failed state write can leave the atomically published solution behind.
+                // A crash or failed state write can leave the atomically published build project behind.
                 // Start a full grace period once state storage is available instead of deleting it immediately.
                 TryWriteState(hash, inactiveState, logger);
                 continue;
@@ -285,7 +285,7 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
 
             if (!TryReadState(statePath, out var inactiveObservedUtc))
             {
-                logger.LogDebug("Retaining coordinated build solution '{Hash}' because its state file is invalid.", hash);
+                logger.LogDebug("Retaining coordinated build project '{Hash}' because its state file is invalid.", hash);
                 continue;
             }
 
@@ -308,11 +308,11 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
             }
 
             if (TryDelete(
-                solutionPath,
+                buildProjectPath,
                 logger,
-                "Failed to prune inactive coordinated build solution '{Path}'."))
+                "Failed to prune inactive coordinated build project '{Path}'."))
             {
-                TryDelete(statePath, logger, "Failed to delete coordinated build solution state file '{Path}'.");
+                TryDelete(statePath, logger, "Failed to delete coordinated build project state file '{Path}'.");
                 TryDeleteEmptyDirectory(leaseDirectory, logger);
             }
         }
@@ -332,19 +332,19 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            logger.LogDebug(ex, "Failed to enumerate coordinated build solution state in '{Path}'.", stateDirectory);
+            logger.LogDebug(ex, "Failed to enumerate coordinated build project state in '{Path}'.", stateDirectory);
             return;
         }
 
         foreach (var statePath in statePaths)
         {
             var hash = Path.GetFileNameWithoutExtension(statePath);
-            if (!IsSolutionHash(hash))
+            if (!IsBuildProjectHash(hash))
             {
                 continue;
             }
 
-            if (File.Exists(GetSolutionPath(hash)))
+            if (File.Exists(GetBuildProjectPath(hash)))
             {
                 continue;
             }
@@ -373,11 +373,11 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
         string[] temporaryPaths;
         try
         {
-            temporaryPaths = Directory.GetFiles(SolutionDirectory, ".*.tmp");
+            temporaryPaths = Directory.GetFiles(BuildDirectory, ".*.tmp");
         }
         catch (Exception ex) when (ex is DirectoryNotFoundException or IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            logger.LogDebug(ex, "Failed to enumerate temporary coordinated build solution files in '{Path}'.", SolutionDirectory);
+            logger.LogDebug(ex, "Failed to enumerate temporary coordinated build project files in '{Path}'.", BuildDirectory);
             return;
         }
 
@@ -391,12 +391,12 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
                     TryDelete(
                         temporaryPath,
                         logger,
-                        "Failed to prune stale temporary coordinated build solution file '{Path}'.");
+                        "Failed to prune stale temporary coordinated build project '{Path}'.");
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
             {
-                logger.LogDebug(ex, "Failed to inspect temporary coordinated build solution file '{Path}'.", temporaryPath);
+                logger.LogDebug(ex, "Failed to inspect temporary coordinated build project '{Path}'.", temporaryPath);
             }
         }
     }
@@ -451,17 +451,17 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            logger.LogDebug(ex, "Failed to update coordinated build solution state for '{Hash}'.", hash);
+            logger.LogDebug(ex, "Failed to update coordinated build project state for '{Hash}'.", hash);
         }
     }
 
     private string GetLeaseDirectory(string hash) =>
-        Path.Combine(SolutionDirectory, ".leases", "v1", hash);
+        Path.Combine(BuildDirectory, ".leases", "v1", hash);
 
     private string GetStateDirectory() =>
-        Path.Combine(SolutionDirectory, ".artifacts", "v1");
+        Path.Combine(BuildDirectory, ".artifacts", "v1");
 
-    private static bool IsSolutionHash(string hash) =>
+    private static bool IsBuildProjectHash(string hash) =>
         hash.Length == 12 && hash.All(Uri.IsHexDigit);
 
     private void Stop()
@@ -493,7 +493,7 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_stopping)
         {
-            throw new InvalidOperationException("Coordinated build solution artifacts cannot be acquired while the AppHost is stopping.");
+            throw new InvalidOperationException("Coordinated build project artifacts cannot be acquired while the AppHost is stopping.");
         }
     }
 

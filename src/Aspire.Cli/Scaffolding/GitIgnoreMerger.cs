@@ -23,12 +23,12 @@ internal static class GitIgnoreMerger
 
         var existingEntries = ReadEntries(existingContent).ToHashSet(StringComparer.Ordinal);
         var existingNormalized = existingEntries
-            .Select(NormalizeEntry)
+            .Select(NormalizeRootedEntry)
             .ToHashSet(StringComparer.Ordinal);
 
         var missingEntries = ReadEntries(scaffoldContent)
             .Where(entry => !existingEntries.Contains(entry)
-                && !existingNormalized.Contains(NormalizeEntry(entry)))
+                && !ContainsEquivalentEntry(existingNormalized, entry))
             .ToArray();
 
         if (missingEntries.Length == 0)
@@ -65,8 +65,22 @@ internal static class GitIgnoreMerger
         }
     }
 
-    // Treat rooted (`/foo/`) and unrooted (`foo/`) forms as equivalent when deciding
-    // whether a scaffold entry needs to be appended.
-    private static string NormalizeEntry(string entry)
+    private static bool ContainsEquivalentEntry(HashSet<string> existingEntries, string scaffoldEntry)
+    {
+        var normalizedScaffoldEntry = NormalizeRootedEntry(scaffoldEntry);
+        if (existingEntries.Contains(normalizedScaffoldEntry))
+        {
+            return true;
+        }
+
+        // A slashless pattern matches both a file and a directory, so it already covers a
+        // generated directory-only pattern. The inverse is not true: "foo/" does not cover
+        // a generated "foo" entry because it would leave a file named "foo" unignored.
+        return normalizedScaffoldEntry.EndsWith('/') &&
+            existingEntries.Contains(normalizedScaffoldEntry.TrimEnd('/'));
+    }
+
+    // A rooted pattern is sufficient when the scaffold only needs to ignore the repository-root entry.
+    private static string NormalizeRootedEntry(string entry)
         => entry.StartsWith('/') ? entry[1..] : entry;
 }

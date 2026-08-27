@@ -417,4 +417,24 @@ public class ScaffoldingServiceTests
 
         Assert.Equal(existingContent, mergedContent);
     }
+
+    [Theory]
+    [InlineData(".aspire\n")]
+    [InlineData("/.aspire\n")]
+    public void GitIgnoreMerger_DoesNotAddDirectoryEntryWhenSlashlessPatternAlreadyCoversIt(string existingContent)
+    {
+        var mergedContent = GitIgnoreMerger.Merge(existingContent, ".aspire/\n");
+
+        Assert.Equal(existingContent, mergedContent);
+    }
+
+    [Fact]
+    public void GitIgnoreMerger_AddsSlashlessPatternWhenDirectoryOnlyPatternDoesNotCoverIt()
+    {
+        const string existingContent = ".aspire/\n";
+
+        var mergedContent = GitIgnoreMerger.Merge(existingContent, ".aspire\n");
+
+        Assert.Equal(".aspire/\n.aspire\n", mergedContent);
+    }
 }

@@ -1132,6 +1132,10 @@ internal sealed class DistributedApplicationPipeline : IDistributedApplicationPi
         try
         {
             await step.Action(stepContext).ConfigureAwait(false);
+            if (step.FinalAction is not null)
+            {
+                await step.FinalAction(stepContext).ConfigureAwait(false);
+            }
         }
         catch (DistributedApplicationException)
         {

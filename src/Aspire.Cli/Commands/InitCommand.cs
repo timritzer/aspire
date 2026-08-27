@@ -3,6 +3,7 @@
 
 using System.CommandLine;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Aspire.Cli.Agents;
@@ -348,7 +349,64 @@ internal sealed class InitCommand : BaseCommand
 
         if (!gitIgnoreExists || !string.Equals(existingContent, mergedContent, StringComparison.Ordinal))
         {
-            await File.WriteAllTextAsync(gitIgnorePath, mergedContent, cancellationToken);
+            await WriteAllTextAtomicallyAsync(gitIgnorePath, mergedContent, cancellationToken);
+        }
+    }
+
+    internal static async Task WriteAllTextAtomicallyAsync(string path, string content, CancellationToken cancellationToken)
+    {
+        var fileInfo = new FileInfo(path);
+        if (fileInfo.LinkTarget is not null)
+        {
+            // Replace the resolved target rather than the directory entry for the link. Renaming over
+            // the original path would silently turn a user-authored .gitignore symlink into a regular file.
+            path = fileInfo.ResolveLinkTarget(returnFinalTarget: true)!.FullName;
+        }
+
+        if (File.Exists(path))
+        {
+            // Atomic rename is governed by directory permissions on Unix and could otherwise replace
+            // a read-only file that the previous in-place write correctly refused to modify.
+            using var permissionCheck = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Write,
+                FileShare.ReadWrite | FileShare.Delete);
+        }
+
+        var temporaryPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        UnixFileMode? existingMode = null;
+        if (!OperatingSystem.IsWindows() && File.Exists(path))
+        {
+            existingMode = File.GetUnixFileMode(path);
+        }
+
+        try
+        {
+            await using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.Asynchronous))
+            await using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+            {
+                await writer.WriteAsync(content.AsMemory(), cancellationToken);
+                await writer.FlushAsync(cancellationToken);
+                stream.Flush(flushToDisk: true);
+            }
+
+            if (!OperatingSystem.IsWindows() && existingMode is not null)
+            {
+                File.SetUnixFileMode(temporaryPath, existingMode.Value);
+            }
+
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(temporaryPath);
         }
     }
 

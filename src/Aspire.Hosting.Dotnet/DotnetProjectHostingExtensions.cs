@@ -112,7 +112,7 @@ public static class DotnetProjectHostingExtensions
         // so process and IDE launchers resolve the output produced by the coordinated build.
         var configuration = builder.AppHostAssembly?.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration;
         var projectMetadata = new DotnetProjectMetadata(path, configuration);
-        var buildResource = DotnetProjectBuildCoordinator.Prepare(builder, projectMetadata);
+        var buildCoordinator = DotnetProjectBuildCoordinator.Prepare(builder, projectMetadata);
 
         // ExecutableResource requires a working directory. Use the project/app directory so the process
         // launches from the same place a ProjectResource would (DCP used Path.GetDirectoryName(ProjectPath)).
@@ -128,7 +128,7 @@ public static class DotnetProjectHostingExtensions
                               .WithIconName("CodeCsRectangle")
                               .WithProjectDefaults(options);
 
-        DotnetProjectBuildCoordinator.Configure(resource, buildResource);
+        DotnetProjectBuildCoordinator.Configure(resource, buildCoordinator);
 
         // Declare the default `dotnet run` invocation separately from the program arguments so a later
         // WithLaunchToolArgs call replaces it instead of being prepended to it:
