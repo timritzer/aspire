@@ -86,7 +86,9 @@ public sealed class AnalyzeCiFailureWorkflowTests
             Assert.Contains("ANALYSIS_RUN_SCOPE=$(jq -r '.run_scope' \"$ANALYSIS_FILE\")", workflow, StringComparison.Ordinal);
             Assert.Contains("Analysis result does not match trusted run context\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Main run analysis must not identify a subject PR\"\nexit 1", workflow, StringComparison.Ordinal);
-            Assert.Contains("Analysis must contain failed_jobs and string-valued causes arrays\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("TRUSTED_FAILED_JOBS_FILE=\"ci-failure-data/failed-jobs.json\"", workflow, StringComparison.Ordinal);
+            Assert.Contains("Analysis must contain numeric-ID failed_jobs and string-valued causes arrays\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("Analysis failed-job IDs do not match the trusted failed jobs\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Verdict '${VERDICT}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("type '${CAUSE_TYPE}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Cause ${CAUSE_BASENAME} is not referenced by the analysis summary\"\nexit 1", workflow, StringComparison.Ordinal);
@@ -110,6 +112,10 @@ public sealed class AnalyzeCiFailureWorkflowTests
         Assert.Contains("### If failures include Transient Test Failures and no deterministic failures:", s_sourceWorkflow, StringComparison.Ordinal);
         Assert.Contains("### If ALL failures are Non-Transient PR Code Issues:", s_sourceWorkflow, StringComparison.Ordinal);
         Assert.Contains("### If ALL failures are Main Repository Breakages:", s_sourceWorkflow, StringComparison.Ordinal);
+        Assert.Contains(
+            "Use `\"transient-infra\"` when every failed job is an infrastructure issue, `\"flaky-test\"` when at least one failed job is a flaky test and every failed job is transient",
+            s_sourceWorkflow,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -128,6 +134,9 @@ public sealed class AnalyzeCiFailureWorkflowTests
                 "const analysisFile = path.join(path.dirname(outputFile), 'agent', 'analysis-result.json');",
                 "if (!enableRerun)");
             Assert.Contains("const causesDir = path.join(path.dirname(outputFile), 'agent', 'causes');", rerunValidation, StringComparison.Ordinal);
+            Assert.Contains("const trustedFailedJobsFile = path.join('ci-failure-data', 'failed-jobs.json');", rerunValidation, StringComparison.Ordinal);
+            Assert.Contains("analysisJobIdSet.size !== trustedJobIdSet.size", rerunValidation, StringComparison.Ordinal);
+            Assert.Contains("!analysisJobIds.every(jobId => trustedJobIdSet.has(jobId))", rerunValidation, StringComparison.Ordinal);
             Assert.Contains("core.setFailed('Rerun requires unique analysis cause IDs matching the generated cause files');\nreturn;", rerunValidation, StringComparison.Ordinal);
             Assert.Contains("cause.type !== 'infra-failure'", rerunValidation, StringComparison.Ordinal);
             Assert.Contains("!summaryCauseIds.includes(causeId)", rerunValidation, StringComparison.Ordinal);

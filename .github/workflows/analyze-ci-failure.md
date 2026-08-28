@@ -587,8 +587,9 @@ safe-outputs:
             ANALYSIS_FILE="$(dirname "$GH_AW_AGENT_OUTPUT")/agent/analysis-result.json"
             CAUSES_DIR="$(dirname "$GH_AW_AGENT_OUTPUT")/agent/causes"
             RUN_CONTEXT_FILE="ci-failure-data/run-context.json"
-            if [ ! -f "$ANALYSIS_FILE" ] || [ ! -f "$RUN_CONTEXT_FILE" ]; then
-              echo "::error::Analysis result or trusted run context not found"
+            TRUSTED_FAILED_JOBS_FILE="ci-failure-data/failed-jobs.json"
+            if [ ! -f "$ANALYSIS_FILE" ] || [ ! -f "$RUN_CONTEXT_FILE" ] || [ ! -f "$TRUSTED_FAILED_JOBS_FILE" ]; then
+              echo "::error::Analysis result or trusted run data not found"
               exit 1
             fi
 
@@ -608,10 +609,15 @@ safe-outputs:
             fi
             if ! jq -e '
               (.failed_jobs | type == "array") and
+              all(.failed_jobs[]; (.id | type) == "number") and
               (.causes | type == "array") and
               all(.causes[]; type == "string")
             ' "$ANALYSIS_FILE" >/dev/null; then
-              echo "::error::Analysis must contain failed_jobs and string-valued causes arrays"
+              echo "::error::Analysis must contain numeric-ID failed_jobs and string-valued causes arrays"
+              exit 1
+            fi
+            if ! jq -e '(type == "array") and all(.[]; (.id | type) == "number")' "$TRUSTED_FAILED_JOBS_FILE" >/dev/null; then
+              echo "::error::Trusted failed jobs are invalid"
               exit 1
             fi
 
@@ -636,9 +642,16 @@ safe-outputs:
             MAIN_BREAK_JOB_COUNT=$(jq '[.failed_jobs[]? | select(.classification == "main-repository-breakage")] | length' "$ANALYSIS_FILE")
             KNOWN_JOB_COUNT=$((INFRA_JOB_COUNT + FLAKY_JOB_COUNT + CODE_ISSUE_JOB_COUNT + MAIN_BREAK_JOB_COUNT))
             TRANSIENT_JOB_COUNT=$((INFRA_JOB_COUNT + FLAKY_JOB_COUNT))
+            UNIQUE_ANALYSIS_JOB_COUNT=$(jq '[.failed_jobs[].id] | unique | length' "$ANALYSIS_FILE")
+            ANALYSIS_JOB_IDS=$(jq -c '[.failed_jobs[].id] | sort' "$ANALYSIS_FILE")
+            TRUSTED_JOB_IDS=$(jq -c '[.[].id] | sort' "$TRUSTED_FAILED_JOBS_FILE")
 
             if [ "$FAILED_JOB_COUNT" -eq 0 ] || [ "$KNOWN_JOB_COUNT" -ne "$FAILED_JOB_COUNT" ]; then
               echo "::error::Analysis must classify every failed job with a recognized classification"
+              exit 1
+            fi
+            if [ "$UNIQUE_ANALYSIS_JOB_COUNT" -ne "$FAILED_JOB_COUNT" ] || [ "$ANALYSIS_JOB_IDS" != "$TRUSTED_JOB_IDS" ]; then
+              echo "::error::Analysis failed-job IDs do not match the trusted failed jobs"
               exit 1
             fi
             if { [ "$TRUSTED_RUN_SCOPE" = "main" ] && [ "$CODE_ISSUE_JOB_COUNT" -ne 0 ]; } ||
@@ -1179,13 +1192,17 @@ safe-outputs:
               const analysisFile = path.join(path.dirname(outputFile), 'agent', 'analysis-result.json');
               const causesDir = path.join(path.dirname(outputFile), 'agent', 'causes');
               const runContextFile = path.join('ci-failure-data', 'run-context.json');
-              if (!fs.existsSync(analysisFile) || !fs.existsSync(runContextFile)) {
-                core.setFailed('Analysis result or trusted run context not found');
+              const trustedFailedJobsFile = path.join('ci-failure-data', 'failed-jobs.json');
+              if (!fs.existsSync(analysisFile) ||
+                  !fs.existsSync(runContextFile) ||
+                  !fs.existsSync(trustedFailedJobsFile)) {
+                core.setFailed('Analysis result or trusted run data not found');
                 return;
               }
 
               const analysis = JSON.parse(fs.readFileSync(analysisFile, 'utf8'));
               const runContext = JSON.parse(fs.readFileSync(runContextFile, 'utf8'));
+              const trustedFailedJobs = JSON.parse(fs.readFileSync(trustedFailedJobsFile, 'utf8'));
               const owner = context.repo.owner;
               const repo = context.repo.repo;
               const requestedRunId = Number(item.run_id);
@@ -1219,8 +1236,24 @@ safe-outputs:
               }
               if (!Array.isArray(analysis.failed_jobs) ||
                   analysis.failed_jobs.length === 0 ||
+                  !analysis.failed_jobs.every(job => job && Number.isInteger(job.id)) ||
                   !analysis.failed_jobs.every(job => job && job.classification === 'transient-infra')) {
                 core.setFailed('Rerun requires every failed job to be classified as transient-infra');
+                return;
+              }
+              if (!Array.isArray(trustedFailedJobs) ||
+                  !trustedFailedJobs.every(job => job && Number.isInteger(job.id))) {
+                core.setFailed('Trusted failed jobs are invalid');
+                return;
+              }
+              const analysisJobIds = analysis.failed_jobs.map(job => job.id);
+              const trustedJobIds = trustedFailedJobs.map(job => job.id);
+              const analysisJobIdSet = new Set(analysisJobIds);
+              const trustedJobIdSet = new Set(trustedJobIds);
+              if (analysisJobIdSet.size !== analysisJobIds.length ||
+                  analysisJobIdSet.size !== trustedJobIdSet.size ||
+                  !analysisJobIds.every(jobId => trustedJobIdSet.has(jobId))) {
+                core.setFailed('Analysis failed-job IDs do not match the trusted failed jobs');
                 return;
               }
 
@@ -1377,7 +1410,7 @@ Write the run summary to `/tmp/gh-aw/agent/analysis-result.json`. The JSON must 
 
 Field details:
 - `run_scope`: Copy the immutable run scope from the summary exactly.
-- `verdict`: The overall classification. Use `"transient-infra"` if ALL failures are infrastructure issues, `"flaky-test"` if ANY failures are flaky tests (and none are deterministic repository issues), `"code-issue"` for failures caused by pull request changes, `"main-repository-breakage"` for deterministic repository failures on main, or `"mixed"` if there are both transient and non-transient failures.
+- `verdict`: The overall classification. Use `"transient-infra"` when every failed job is an infrastructure issue, `"flaky-test"` when at least one failed job is a flaky test and every failed job is transient, `"code-issue"` when every failed job is caused by pull request changes, `"main-repository-breakage"` when every failed job is a deterministic repository failure on main, or `"mixed"` when transient and non-transient failures occur together.
 - `pr`: For pull-request scope, include the subject PR object. For main scope, this MUST be `null`.
 - `triggering_merge_pr`: For main scope, include the triggering merge PR from the summary when available. It is non-causal context and MUST NOT be copied to `pr`. For pull-request scope, this is `null`.
 - `main_context`: For main scope, include `last_successful_main_sha`, `failed_sha`, and `candidate_merges` from the summary. For pull-request scope, this is `null`.
