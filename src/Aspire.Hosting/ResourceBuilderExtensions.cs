@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #pragma warning disable ASPIREPERSISTENCE001 // Persistence annotation APIs are experimental.
+#pragma warning disable ASPIREENVIRONMENT001 // Runtime environment annotation APIs are experimental.
 
 using System.Diagnostics.CodeAnalysis;
 using System.Net.Http.Headers;
@@ -388,15 +389,53 @@ public static class ResourceBuilderExtensions
         return builder.WithAnnotation(new EnvironmentCallbackAnnotation(callback));
     }
 
-    private static IResourceBuilder<T> WithRuntimeEnvironment<T>(this IResourceBuilder<T> builder, Action<EnvironmentCallbackContext> callback)
+    /// <summary>
+    /// Adds an environment callback whose values are needed only when the resource runs.
+    /// </summary>
+    /// <typeparam name="T">The resource type.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="callback">The callback that populates runtime environment variables.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{T}"/> for chaining.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// Thrown when <paramref name="builder"/> or <paramref name="callback"/> is null.
+    /// </exception>
+    /// <remarks>
+    /// Use this method for reference data such as connection strings and service-discovery endpoints.
+    /// Build integrations can exclude these callbacks when constructing a build process environment.
+    /// </remarks>
+    [Experimental("ASPIREENVIRONMENT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExportIgnore(Reason = "Raw Action delegate callbacks are not ATS-compatible.")]
+    public static IResourceBuilder<T> WithRuntimeEnvironment<T>(this IResourceBuilder<T> builder, Action<EnvironmentCallbackContext> callback)
         where T : IResourceWithEnvironment
     {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(callback);
+
         return builder.WithAnnotation(new RuntimeEnvironmentCallbackAnnotation(callback));
     }
 
-    private static IResourceBuilder<T> WithRuntimeEnvironment<T>(this IResourceBuilder<T> builder, Func<EnvironmentCallbackContext, Task> callback)
+    /// <summary>
+    /// Adds an asynchronous environment callback whose values are needed only when the resource runs.
+    /// </summary>
+    /// <typeparam name="T">The resource type.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="callback">The callback that asynchronously populates runtime environment variables.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{T}"/> for chaining.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// Thrown when <paramref name="builder"/> or <paramref name="callback"/> is null.
+    /// </exception>
+    /// <remarks>
+    /// Use this method for reference data such as connection strings and service-discovery endpoints.
+    /// Build integrations can exclude these callbacks when constructing a build process environment.
+    /// </remarks>
+    [Experimental("ASPIREENVIRONMENT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExportIgnore(Reason = "Raw Func delegate callbacks are not ATS-compatible.")]
+    public static IResourceBuilder<T> WithRuntimeEnvironment<T>(this IResourceBuilder<T> builder, Func<EnvironmentCallbackContext, Task> callback)
         where T : IResourceWithEnvironment
     {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(callback);
+
         return builder.WithAnnotation(new RuntimeEnvironmentCallbackAnnotation(callback));
     }
 

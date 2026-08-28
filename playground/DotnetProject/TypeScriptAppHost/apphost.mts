@@ -6,7 +6,7 @@ const apiservice = await builder
     .addDotnetProject("apiservice", "../DotnetProject.ApiService")
     .withExternalHttpEndpoints();
 
-const workerservice = await builder
+await builder
     .addDotnetProject("workerservice", "../DotnetProject.WorkerService")
     .withReference(apiservice)
     .withExternalHttpEndpoints();

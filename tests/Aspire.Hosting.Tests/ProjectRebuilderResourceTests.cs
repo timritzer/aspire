@@ -1,7 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Reflection;
+#pragma warning disable ASPIREPROJECTS001
+
 using Aspire.Hosting.Testing;
 using Aspire.Hosting.Tests.Utils;
 using Aspire.Hosting.Utils;
@@ -12,13 +13,12 @@ namespace Aspire.Hosting.Tests;
 public class ProjectRebuilderResourceTests
 {
     [Fact]
-    public async Task AddProjectRebuilderUsesReleaseAppHostConfiguration()
+    public async Task AddProjectRebuilderUsesConfiguredBuildConfiguration()
     {
-        var releaseAssembly = typeof(object).Assembly;
-        Assert.Equal("Release", releaseAssembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration);
-
-        using var builder = CreateBuilder(releaseAssembly);
+        using var builder = CreateBuilder();
         var project = builder.AddProject<Projects.ServiceA>("servicea", options => options.ExcludeLaunchProfile = true);
+        var launchDefaults = Assert.Single(project.Resource.Annotations.OfType<ProjectLaunchDefaultsAnnotation>());
+        launchDefaults.BuildConfiguration = "Release";
 
         var rebuilder = Assert.Single(builder.Resources.OfType<ProjectRebuilderResource>());
         var args = await ArgumentEvaluator.GetArgumentListAsync(rebuilder);
@@ -36,11 +36,10 @@ public class ProjectRebuilderResourceTests
     [Fact]
     public async Task AddProjectRebuilderOmitsConfigurationWhenAppHostConfigurationIsUnavailable()
     {
-        var unconfiguredAssembly = typeof(Enumerable).Assembly;
-        Assert.Null(unconfiguredAssembly.GetCustomAttribute<AssemblyConfigurationAttribute>());
-
-        using var builder = CreateBuilder(unconfiguredAssembly);
+        using var builder = CreateBuilder();
         var project = builder.AddProject<Projects.ServiceA>("servicea", options => options.ExcludeLaunchProfile = true);
+        var launchDefaults = Assert.Single(project.Resource.Annotations.OfType<ProjectLaunchDefaultsAnnotation>());
+        launchDefaults.BuildConfiguration = null;
 
         var rebuilder = Assert.Single(builder.Resources.OfType<ProjectRebuilderResource>());
         var args = await ArgumentEvaluator.GetArgumentListAsync(rebuilder);
@@ -53,8 +52,8 @@ public class ProjectRebuilderResourceTests
             args);
     }
 
-    private static IDistributedApplicationTestingBuilder CreateBuilder(Assembly appHostAssembly)
+    private static IDistributedApplicationTestingBuilder CreateBuilder()
     {
-        return TestDistributedApplicationBuilder.Create(options => options.AssemblyName = appHostAssembly.FullName);
+        return TestDistributedApplicationBuilder.Create();
     }
 }

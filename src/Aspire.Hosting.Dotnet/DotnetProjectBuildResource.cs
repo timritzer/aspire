@@ -163,6 +163,9 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource, IDisposab
         _artifactManager.RegisterForShutdown(applicationLifetime);
     }
 
+    internal bool IsBuildProjectLeaseActive(string hash) =>
+        _artifactManager.IsLeaseActive(hash);
+
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -186,8 +189,8 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource, IDisposab
                             new XAttribute(
                                 "Include",
                                 EscapeMsBuildPath(NormalizePath(Path.GetRelativePath(BuildDirectory, projectPath))))))),
-                CreateTraversalTarget("Restore"),
-                CreateTraversalTarget("Build")));
+                CreateTraversalTarget("Restore", buildInParallel: false),
+                CreateTraversalTarget("Build", buildInParallel: true)));
 
         using var projectStream = new MemoryStream();
         var writerSettings = new XmlWriterSettings
@@ -213,7 +216,7 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource, IDisposab
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static XElement CreateTraversalTarget(string name) =>
+    private static XElement CreateTraversalTarget(string name, bool buildInParallel) =>
         new(
             "Target",
             new XAttribute("Name", name),
@@ -221,7 +224,7 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource, IDisposab
                 "MSBuild",
                 new XAttribute("Projects", "@(ProjectFile)"),
                 new XAttribute("Targets", name),
-                new XAttribute("BuildInParallel", "true")));
+                new XAttribute("BuildInParallel", buildInParallel)));
 
     private static string NormalizePath(string path) =>
         path.Replace(Path.DirectorySeparatorChar, '/');

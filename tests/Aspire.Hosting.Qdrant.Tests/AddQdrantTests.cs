@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#pragma warning disable ASPIREENVIRONMENT001
+
 using System.Net.Sockets;
 using System.Reflection;
 using Aspire.Hosting.ApplicationModel;
@@ -187,8 +189,19 @@ public class AddQdrantTests(ITestOutputHelper testOutputHelper)
                 e.AllAllocatedEndpoints.AddOrUpdateAllocatedEndpoint(KnownNetworkIdentifiers.DefaultAspireContainerNetwork, new AllocatedEndpoint(e, "my-qdrant.dev.internal", 6333, EndpointBindingMode.SingleAddress, targetPortExpression: null, networkId: KnownNetworkIdentifiers.DefaultAspireContainerNetwork));
             });
 
-        var projectA = appBuilder.AddProject<ProjectA>("projecta", o => o.ExcludeLaunchProfile = true)
-            .WithReference(qdrant);
+        var projectA = appBuilder.AddProject<ProjectA>("projecta", o => o.ExcludeLaunchProfile = true);
+        var baselineEnvironmentCallbacks = projectA.Resource.Annotations
+            .OfType<EnvironmentCallbackAnnotation>()
+            .ToHashSet(ReferenceEqualityComparer.Instance);
+
+        projectA.WithReference(qdrant);
+
+        var referenceEnvironmentCallbacks = projectA.Resource.Annotations
+            .OfType<EnvironmentCallbackAnnotation>()
+            .Where(callback => !baselineEnvironmentCallbacks.Contains(callback))
+            .ToArray();
+        Assert.Equal(2, referenceEnvironmentCallbacks.Length);
+        Assert.All(referenceEnvironmentCallbacks, callback => Assert.IsType<RuntimeEnvironmentCallbackAnnotation>(callback));
 
         // Call environment variable callbacks.
         var config = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(projectA.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);

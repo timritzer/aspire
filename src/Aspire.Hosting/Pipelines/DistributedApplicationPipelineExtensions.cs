@@ -12,6 +12,44 @@ namespace Aspire.Hosting.Pipelines;
 public static class DistributedApplicationPipelineExtensions
 {
     /// <summary>
+    /// Configures an action that runs after the named pipeline step and all of its dependencies complete.
+    /// </summary>
+    /// <param name="pipeline">The distributed application pipeline.</param>
+    /// <param name="stepName">The name of the pipeline step.</param>
+    /// <param name="action">The final action to execute.</param>
+    /// <returns>The distributed application pipeline for chaining.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// Thrown when <paramref name="pipeline"/> or <paramref name="action"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="stepName"/> is null or empty.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when the named step does not exist or already has a final action.
+    /// </exception>
+    /// <remarks>
+    /// The final action is configured when the pipeline graph is resolved, so it runs after dependencies
+    /// added by resource annotations and other pipeline configuration callbacks.
+    /// </remarks>
+    [AspireExportIgnore(Reason = "Delegate callbacks are not ATS-compatible.")]
+    public static IDistributedApplicationPipeline WithFinalAction(
+        this IDistributedApplicationPipeline pipeline,
+        string stepName,
+        Func<PipelineStepContext, Task> action)
+    {
+        ArgumentNullException.ThrowIfNull(pipeline);
+        ArgumentException.ThrowIfNullOrEmpty(stepName);
+        ArgumentNullException.ThrowIfNull(action);
+
+        pipeline.AddPipelineConfiguration(context =>
+        {
+            var step = context.Steps.Single(candidate => candidate.Name == stepName);
+            step.SetFinalAction(action);
+            return Task.CompletedTask;
+        });
+
+        return pipeline;
+    }
+
+    /// <summary>
     /// Disables the publish and deploy validation that requires build-only containers to be consumed by another resource.
     /// </summary>
     /// <param name="pipeline">The distributed application pipeline.</param>

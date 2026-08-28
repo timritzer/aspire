@@ -5,6 +5,7 @@
 #pragma warning disable ASPIREEXTENSION001
 #pragma warning disable ASPIREPERSISTENCE001
 #pragma warning disable ASPIREPIPELINES001
+#pragma warning disable ASPIREPROJECTS001
 
 using System.Reflection;
 using System.Text.Json;
@@ -467,14 +468,13 @@ public class DotnetProjectResourceTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
-    public async Task AddDotnetProject_RebuilderUsesReleaseAppHostConfiguration()
+    public async Task AddDotnetProject_RebuilderUsesConfiguredBuildConfiguration()
     {
-        var releaseAssembly = typeof(object).Assembly;
-        Assert.Equal("Release", releaseAssembly.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration);
-
-        using var builder = TestDistributedApplicationBuilder.Create(options => options.AssemblyName = releaseAssembly.FullName);
+        using var builder = TestDistributedApplicationBuilder.Create();
         var projectPath = Path.Combine(builder.AppHostDirectory, "MyService", "MyService.csproj");
-        builder.AddDotnetProject("svc", projectPath, options => options.ExcludeLaunchProfile = true);
+        var project = builder.AddDotnetProject("svc", projectPath, options => options.ExcludeLaunchProfile = true);
+        var launchDefaults = Assert.Single(project.Resource.Annotations.OfType<ProjectLaunchDefaultsAnnotation>());
+        launchDefaults.BuildConfiguration = "Release";
 
         var rebuilder = Assert.Single(builder.Resources.OfType<ProjectRebuilderResource>());
         var args = await ArgumentEvaluator.GetArgumentListAsync(rebuilder);

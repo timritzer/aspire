@@ -49,6 +49,23 @@ public class PathNormalizerTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public void ResolveToFilesystemPath_ReturnsExactPath_WhenVolumeIsCaseSensitive()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+
+        var directory = workspace.WorkspaceRoot.CreateSubdirectory("MixedCase");
+        var file = new FileInfo(Path.Combine(directory.FullName, "App.csproj"));
+        File.WriteAllText(file.FullName, "<Project />");
+        var caseVariantPath = Path.Combine(workspace.WorkspaceRoot.FullName, "mixedcase", "app.CSPROJ");
+        if (File.Exists(caseVariantPath))
+        {
+            Assert.Skip("The test volume is case-insensitive.");
+        }
+
+        Assert.Equal(file.FullName, PathNormalizer.ResolveToFilesystemPath(file.FullName));
+    }
+
+    [Fact]
     public void ResolveToFilesystemPath_ReturnsMissingPathUnchanged()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);

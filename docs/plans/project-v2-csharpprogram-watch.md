@@ -210,11 +210,11 @@ so `#:project` references cannot race it.
 
 ### 5.4 Generalized project-defaults wiring (core ↔ package)
 Today `WithProjectDefaults` / `SetAspNetCoreUrls` / rebuilder / launchSettings-endpoint logic are
-`private`/`where T : ProjectResource` in `Aspire.Hosting`. `AddDotnetProject` (different assembly,
-non-`ProjectResource`) must reuse them. **Decision (R2):** generalize to an internal interface
-(`IProjectLaunchDefaultsResource`) implemented by both `ProjectResource` (core) and `DotnetProjectResource`
-(package), making the helpers generic over it and exposing them via `InternalsVisibleTo` — preferred
-over reimplementing the defaults in the package. The shipped `CSharpAppResource : ProjectResource` keeps
+owned by `Aspire.Hosting`. `AddDotnetProject` (different assembly, non-`ProjectResource`) must reuse them.
+**Decision (R2):** expose the reusable project-defaults and pipeline seams as experimental public APIs,
+while source-linking implementation helpers such as path, launch-profile, and command-line parsing into
+`Aspire.Hosting.Dotnet`. The language package must remain buildable from the public `Aspire.Hosting`
+surface without production `InternalsVisibleTo`. The shipped `CSharpAppResource : ProjectResource` keeps
 working through the same generalized helpers unchanged.
 
 ### 5.5 Core run configuration state (new, minimal)
@@ -432,10 +432,10 @@ callbacks may need to run for build/closure even when a resource isn't "running"
   `"project"` path could affect Azure Functions / file-based-app categorization. Mitigate with an
   annotation/metadata-driven predicate + regression tests; fall back to a dedicated prepare path or a distinct
   launch type recognized by DCP/the Aspire extension.
-- **R2 — Cross-assembly reuse of `WithProjectDefaults` (Session 1).** Heavily `ProjectResource`-typed and
-  `private` in core. Generalize over a shared internal interface (`IProjectLaunchDefaultsResource`, implemented
-  by both `ProjectResource` and `DotnetProjectResource`) exposed via `InternalsVisibleTo`; avoid divergent
-  reimplementation in the package.
+- **R2 — Core ↔ language package boundary.** Generalize project defaults behind narrow experimental public
+  seams used by both `ProjectResource` and `DotnetProjectResource`; source-link low-level implementation
+  helpers where necessary and avoid both production `InternalsVisibleTo` and divergent copies of
+  launchSettings/Kestrel/dev-cert/rebuilder logic.
 - **R3 — Feed availability (A2).** `Microsoft.DotNet.HotReload.Watch.Aspire` must be mirrored to an approved
   internal feed before Session 4.
 - **R4 — Watch tool ↔ SDK coupling (A3).** `--sdk <dir>` must match the active SDK; resolve at runtime.

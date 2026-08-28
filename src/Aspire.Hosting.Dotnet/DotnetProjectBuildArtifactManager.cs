@@ -168,6 +168,9 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
     internal string GetStatePath(string hash) =>
         Path.Combine(GetStateDirectory(), $"{hash}{StateFileExtension}");
 
+    internal bool IsLeaseActive(string hash) =>
+        HeldFileLease.Probe(GetLeaseDirectory(hash), LeaseFileExtension) is HeldFileLeaseProbeResult.Active;
+
     private async Task PublishBuildProjectAsync(
         string buildProjectPath,
         byte[] buildProjectBytes,

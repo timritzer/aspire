@@ -178,7 +178,8 @@ public static class QdrantBuilderExtensions
 
         if (flags.HasFlag(ReferenceEnvironmentInjectionFlags.ConnectionString))
         {
-            builder.WithEnvironment(context =>
+#pragma warning disable ASPIREENVIRONMENT001 // Reference values are runtime-only.
+            builder.WithRuntimeEnvironment(context =>
             {
                 // primary endpoint (gRPC)
                 context.EnvironmentVariables[$"{connectionStringName}"] = qdrantResource.Resource.ConnectionStringExpression;
@@ -186,6 +187,7 @@ public static class QdrantBuilderExtensions
                 // HTTP endpoint
                 context.EnvironmentVariables[$"{connectionStringName}_{QdrantServerResource.HttpEndpointName}"] = qdrantResource.Resource.HttpConnectionStringExpression;
             });
+#pragma warning restore ASPIREENVIRONMENT001
         }
 
         return builder;

@@ -1,11 +1,10 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#pragma warning disable ASPIREDOTNETPROJECT001, ASPIREPIPELINES001
+#pragma warning disable ASPIREDOTNETPROJECT001, ASPIREENVIRONMENT001, ASPIREPIPELINES001
 
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Pipelines;
 using Aspire.Hosting.Utils;
@@ -51,32 +50,23 @@ internal static class DotnetProjectBuildCoordinator
             return;
         }
 
-        var launchProfile = resourceBuilder.Resource.GetEffectiveLaunchProfile()?.LaunchProfile;
+        var launchProfileEnvironment = resourceBuilder.Resource.GetEffectiveLaunchProfile()?.LaunchProfile.EnvironmentVariables;
         state.AddResource(
             resourceBuilder.Resource,
-            hasLaunchProfileEnvironment: launchProfile?.EnvironmentVariables.Count > 0);
+            launchProfileEnvironment is null
+                ? []
+                : new Dictionary<string, string>(launchProfileEnvironment, StringComparer.Ordinal));
 
         // Preserve the eagerly visible dependency used by model tests and tooling. BeforeStart replaces
         // the build plan after all resource environment callbacks and SDK roots are known, then adds the
         // final build barrier as an additional dependency.
-        if (state.PrimaryBuildResource is { } primaryBuildResource)
-        {
-            foreach (var resource in state.Resources)
-            {
-                if (resource.Annotations.OfType<DotnetProjectMetadata>().SingleOrDefault() is { } metadata &&
-                    IsSupportedPath(metadata.ProjectPath))
-                {
-                    AddBuildDependency(resourceBuilder.ApplicationBuilder, resource, primaryBuildResource);
-                }
-            }
-        }
+        state.AddEagerBuildDependencies();
     }
 
     private static DotnetProjectBuildResource AddBuildResource(
         IDistributedApplicationBuilder builder,
         string name,
-        string? configuration,
-        bool registerWithServices)
+        string? configuration)
     {
         var buildDirectory = Path.Combine(builder.AppHostDirectory, ".aspire", "build");
         var buildResource = new DotnetProjectBuildResource(
@@ -85,13 +75,6 @@ internal static class DotnetProjectBuildCoordinator
             buildDirectory,
             TimeProvider.System);
         buildResource.Annotations.Add(NameValidationPolicyAnnotation.None);
-
-        if (registerWithServices)
-        {
-            // A factory registration makes the service provider own and dispose this existing model resource.
-            // The instance registration overload would leave disposal with the caller.
-            builder.Services.AddSingleton(_ => buildResource);
-        }
 
         builder.AddResource(buildResource)
             .WithArgs(async context =>
@@ -211,6 +194,8 @@ internal static class DotnetProjectBuildCoordinator
         private readonly IDistributedApplicationBuilder _builder;
         private readonly List<ResourceRegistration> _registrations = [];
         private readonly List<DotnetProjectBuildResource> _ownedBuildResources = [];
+        private readonly Dictionary<DotnetProjectResource, Action> _eagerDependencyRollbacks =
+            new(ReferenceEqualityComparer.Instance);
         private bool _materialized;
         private bool _disposed;
 
@@ -218,14 +203,11 @@ internal static class DotnetProjectBuildCoordinator
         {
             _builder = builder;
             builder.Services.AddSingleton(_ => this);
-            builder.Pipeline.AddPipelineConfiguration(context =>
-            {
-                var beforeStartStep = context.Steps.Single(step => step.Name == WellKnownPipelineSteps.BeforeStart);
-                beforeStartStep.SetFinalAction(stepContext => stepContext.Services
+            builder.Pipeline.WithFinalAction(
+                WellKnownPipelineSteps.BeforeStart,
+                stepContext => stepContext.Services
                     .GetRequiredService<CoordinatorState>()
-                    .MaterializeBuildPlan(stepContext.Services));
-                return Task.CompletedTask;
-            });
+                    .MaterializeBuildPlan(stepContext.Model, stepContext.Services));
         }
 
         public IReadOnlyList<DotnetProjectResource> Resources =>
@@ -240,7 +222,9 @@ internal static class DotnetProjectBuildCoordinator
             return PrimaryBuildResource.AddProject(projectPath);
         }
 
-        public void AddResource(DotnetProjectResource resource, bool hasLaunchProfileEnvironment)
+        public void AddResource(
+            DotnetProjectResource resource,
+            IReadOnlyDictionary<string, string> launchProfileEnvironment)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var baselineEnvironmentCallbacks = resource.TryGetEnvironmentVariables(out var environmentCallbacks)
@@ -249,7 +233,31 @@ internal static class DotnetProjectBuildCoordinator
             _registrations.Add(new ResourceRegistration(
                 resource,
                 baselineEnvironmentCallbacks,
-                hasLaunchProfileEnvironment));
+                launchProfileEnvironment));
+        }
+
+        public void AddEagerBuildDependencies()
+        {
+            if (PrimaryBuildResource is not { } primaryBuildResource)
+            {
+                return;
+            }
+
+            foreach (var registration in _registrations)
+            {
+                var resource = registration.Resource;
+                if (_eagerDependencyRollbacks.ContainsKey(resource) ||
+                    resource.Annotations.OfType<DotnetProjectMetadata>().SingleOrDefault() is not { } metadata ||
+                    !IsSupportedPath(metadata.ProjectPath))
+                {
+                    continue;
+                }
+
+                if (AddBuildDependency(_builder, resource, primaryBuildResource) is { } rollback)
+                {
+                    _eagerDependencyRollbacks.Add(resource, rollback);
+                }
+            }
         }
 
         public void Dispose()
@@ -260,20 +268,32 @@ internal static class DotnetProjectBuildCoordinator
             }
 
             _disposed = true;
+            RemoveEagerBuildDependencies(_registrations.Select(registration => registration.Resource));
             foreach (var buildResource in _ownedBuildResources)
             {
                 buildResource.Dispose();
             }
         }
 
-        internal Task MaterializeBuildPlan(IServiceProvider services)
+        internal Task MaterializeBuildPlan(
+            DistributedApplicationModel model,
+            IServiceProvider services)
         {
             if (_materialized)
             {
                 return Task.CompletedTask;
             }
 
-            var projectEntries = _registrations
+            var activeResources = model.Resources.ToHashSet(ReferenceEqualityComparer.Instance);
+            var activeRegistrations = _registrations
+                .Where(registration => activeResources.Contains(registration.Resource))
+                .ToArray();
+            RemoveEagerBuildDependencies(
+                _registrations
+                    .Where(registration => !activeResources.Contains(registration.Resource))
+                    .Select(registration => registration.Resource));
+
+            var projectEntries = activeRegistrations
                 .Select(registration => new ProjectEntry(
                     registration,
                     registration.Resource.Annotations.OfType<DotnetProjectMetadata>().Single()))
@@ -281,6 +301,15 @@ internal static class DotnetProjectBuildCoordinator
                 .ToArray();
             if (projectEntries.Length == 0)
             {
+                RemoveEagerBuildDependencies(activeRegistrations.Select(registration => registration.Resource));
+                if (PrimaryBuildResource is { } unusedBuildResource)
+                {
+                    _builder.Resources.Remove(unusedBuildResource);
+                    _ownedBuildResources.Remove(unusedBuildResource);
+                    unusedBuildResource.Dispose();
+                    PrimaryBuildResource = null;
+                }
+
                 _materialized = true;
                 return Task.CompletedTask;
             }
@@ -327,7 +356,7 @@ internal static class DotnetProjectBuildCoordinator
                     {
                         var entry = step.Projects.Single();
                         buildResource.ConfigureDirectBuild(entry.Metadata.ProjectPath, step.WorkingDirectory);
-                        var environmentAnnotation = CopyProjectEnvironment(entry.Registration.Resource, buildResource);
+                        var environmentAnnotation = CopyProjectEnvironment(entry, buildResource);
                         rollbackActions.Push(() => buildResource.Annotations.Remove(environmentAnnotation));
                     }
 
@@ -344,7 +373,7 @@ internal static class DotnetProjectBuildCoordinator
                 }
 
                 var finalBuildResource = buildResources[^1];
-                foreach (var registration in _registrations)
+                foreach (var registration in activeRegistrations)
                 {
                     var resource = registration.Resource;
                     if (resource.Annotations.OfType<DotnetProjectMetadata>().SingleOrDefault() is { } metadata &&
@@ -383,6 +412,17 @@ internal static class DotnetProjectBuildCoordinator
             }
 
             return Task.CompletedTask;
+        }
+
+        private void RemoveEagerBuildDependencies(IEnumerable<DotnetProjectResource> resources)
+        {
+            foreach (var resource in resources)
+            {
+                if (_eagerDependencyRollbacks.Remove(resource, out var rollback))
+                {
+                    rollback();
+                }
+            }
         }
 
         private static List<BuildStep> CreateBuildSteps(IEnumerable<ProjectEntry> entries)
@@ -441,35 +481,36 @@ internal static class DotnetProjectBuildCoordinator
             var buildResource = AddBuildResource(
                 _builder,
                 name,
-                configuration,
-                registerWithServices: ordinal is null);
+                configuration);
             _ownedBuildResources.Add(buildResource);
             return buildResource;
         }
 
         private static EnvironmentCallbackAnnotation CopyProjectEnvironment(
-            DotnetProjectResource projectResource,
+            ProjectEntry entry,
             DotnetProjectBuildResource buildResource)
         {
+            // Build-plan materialization is the final action of BeforeStart, so this snapshot includes every
+            // callback that can affect the coordinated initial build without admitting later runtime mutations.
+            var buildEnvironmentCallbacks = GetContextSpecificBuildCallbacks(entry.Registration).ToArray();
             var annotation = new EnvironmentCallbackAnnotation(async context =>
             {
-                var projectConfiguration = await ExecutionConfigurationBuilder
-                    .Create(projectResource)
-                    .WithEnvironmentVariablesConfig()
-                    .BuildAsync(
-                        context.ExecutionContext,
-                        context.Logger,
-                        context.CancellationToken)
-                    .ConfigureAwait(false);
-
-                if (projectConfiguration.Exception is not null)
+                foreach (var (name, value) in entry.Registration.LaunchProfileEnvironment)
                 {
-                    ExceptionDispatchInfo.Throw(projectConfiguration.Exception);
+                    context.EnvironmentVariables.TryAdd(name, Environment.ExpandEnvironmentVariables(value));
                 }
 
-                foreach (var (name, value) in projectConfiguration.EnvironmentVariablesWithUnprocessed)
+                var projectContext = new EnvironmentCallbackContext(
+                    context.ExecutionContext,
+                    entry.Registration.Resource,
+                    context.EnvironmentVariables,
+                    context.CancellationToken)
                 {
-                    context.EnvironmentVariables[name] = value.Unprocessed;
+                    Logger = context.Logger,
+                };
+                foreach (var callback in buildEnvironmentCallbacks)
+                {
+                    await callback.Callback(projectContext).ConfigureAwait(false);
                 }
             });
             buildResource.Annotations.Add(annotation);
@@ -493,20 +534,21 @@ internal static class DotnetProjectBuildCoordinator
 
         private static bool RequiresContextSpecificBuild(ProjectEntry entry)
         {
-            if (entry.Registration.HasLaunchProfileEnvironment)
+            if (entry.Registration.LaunchProfileEnvironment.Count > 0)
             {
                 return true;
             }
 
-            if (!entry.Registration.Resource.TryGetEnvironmentVariables(out var environmentCallbacks))
-            {
-                return false;
-            }
-
-            return environmentCallbacks.Any(
-                callback => callback is not RuntimeEnvironmentCallbackAnnotation &&
-                            !entry.Registration.BaselineEnvironmentCallbacks.Contains(callback));
+            return GetContextSpecificBuildCallbacks(entry.Registration).Any();
         }
+
+        private static IEnumerable<EnvironmentCallbackAnnotation> GetContextSpecificBuildCallbacks(
+            ResourceRegistration registration) =>
+            registration.Resource.TryGetEnvironmentVariables(out var environmentCallbacks)
+                ? environmentCallbacks.Where(
+                    callback => callback is not RuntimeEnvironmentCallbackAnnotation &&
+                                !registration.BaselineEnvironmentCallbacks.Contains(callback))
+                : [];
 
         private readonly record struct BuildContext(string? GlobalJsonPath, string? Configuration);
 
@@ -517,7 +559,7 @@ internal static class DotnetProjectBuildCoordinator
         private sealed record ResourceRegistration(
             DotnetProjectResource Resource,
             HashSet<EnvironmentCallbackAnnotation> BaselineEnvironmentCallbacks,
-            bool HasLaunchProfileEnvironment);
+            IReadOnlyDictionary<string, string> LaunchProfileEnvironment);
 
         private sealed class BuildStep
         {

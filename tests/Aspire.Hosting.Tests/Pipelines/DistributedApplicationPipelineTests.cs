@@ -2253,12 +2253,7 @@ public class DistributedApplicationPipelineTests(ITestOutputHelper testOutputHel
         using var builder = CreatePipelineTestBuilder();
         using var app = builder.Build();
         var pipeline = new DistributedApplicationPipeline();
-        pipeline.AddPipelineConfiguration(context =>
-        {
-            context.Steps.Single(step => step.Name == WellKnownPipelineSteps.BeforeStart)
-                .SetFinalAction(_ => Task.CompletedTask);
-            return Task.CompletedTask;
-        });
+        pipeline.WithFinalAction(WellKnownPipelineSteps.BeforeStart, _ => Task.CompletedTask);
         var context = CreateDeployingContext(app);
 
         var first = await pipeline.ResolveStepsAsync(context).DefaultTimeout();

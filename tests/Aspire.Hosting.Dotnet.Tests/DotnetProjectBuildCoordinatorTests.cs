@@ -1,7 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#pragma warning disable ASPIREDOTNETPROJECT001, ASPIREPIPELINES001
+#pragma warning disable ASPIREDOTNETPROJECT001, ASPIREENVIRONMENT001, ASPIREPIPELINES001
 
 using System.Reflection;
 using Aspire.Hosting.ApplicationModel;
@@ -11,7 +11,6 @@ using Aspire.Hosting.Tests.Helpers;
 using Aspire.Hosting.Tests.Dcp;
 using Aspire.Hosting.Tests.Utils;
 using Aspire.Hosting.Utils;
-using Aspire.Shared;
 using Aspire.TestUtilities;
 using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.Extensions.DependencyInjection;
@@ -70,7 +69,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
-    public async Task ApplicationServiceProviderDisposesBuildResource()
+    public async Task ApplicationServiceProviderDisposesMaterializedBuildResource()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         using var builder = TestDistributedApplicationBuilder.Create(
@@ -81,17 +80,16 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
         await using var app = builder.Build();
 
-        Assert.Same(buildResource, app.Services.GetRequiredService<DotnetProjectBuildResource>());
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
         var buildProjectPath = await buildResource.WriteBuildProjectAsync(
             NullLogger.Instance,
             TestContext.Current.CancellationToken);
         var hash = Path.GetFileNameWithoutExtension(buildProjectPath)["projects.".Length..];
-        var leaseDirectory = Path.Combine(buildResource.BuildDirectory, ".leases", "v1", hash);
-        Assert.Equal(HeldFileLeaseProbeResult.Active, HeldFileLease.Probe(leaseDirectory, ".lease"));
+        Assert.True(buildResource.IsBuildProjectLeaseActive(hash));
 
         await app.DisposeAsync();
 
-        Assert.Equal(HeldFileLeaseProbeResult.None, HeldFileLease.Probe(leaseDirectory, ".lease"));
+        Assert.False(buildResource.IsBuildProjectLeaseActive(hash));
     }
 
     [Theory]
@@ -272,8 +270,10 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             outputHelper);
         var apiPath = CreateProject(workspace.Path, "Api", "Api.csproj");
         var workerPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
-        var api = builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true);
+        var api = builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true)
+            .WithHttpEndpoint();
         var worker = builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
+            .WithReference(api)
             .WithEnvironment("BUILD_FLAVOR", "custom");
         await using var app = builder.Build();
 
@@ -300,7 +300,13 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var directBuildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             buildResources[1],
             serviceProvider: app.Services);
-        Assert.Equal("custom", directBuildEnvironment["BUILD_FLAVOR"]);
+        Assert.Collection(
+            directBuildEnvironment,
+            variable =>
+            {
+                Assert.Equal("BUILD_FLAVOR", variable.Key);
+                Assert.Equal("custom", variable.Value);
+            });
         AssertBuildDependency(api.Resource, buildResources[1]);
         AssertBuildDependency(worker.Resource, buildResources[1]);
     }
@@ -352,6 +358,115 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task ProjectWithCustomRuntimeEnvironmentSharesTraversalBuild()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var apiPath = CreateProject(workspace.Path, "Api", "Api.csproj");
+        var workerPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true);
+        builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
+            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "value");
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal(
+            [NormalizeProjectPath(apiPath), NormalizeProjectPath(workerPath)],
+            buildResource.ProjectPaths);
+    }
+
+    [Fact]
+    public async Task RemovedProjectIsExcludedFromMaterializedBuildPlan()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var activePath = CreateProject(workspace.Path, "Active", "Active.csproj");
+        var removedPath = CreateProject(workspace.Path, "Removed", "Removed.csproj");
+        builder.AddDotnetProject("active", activePath, options => options.ExcludeLaunchProfile = true);
+        var removed = builder.AddDotnetProject("removed", removedPath, options => options.ExcludeLaunchProfile = true);
+        builder.Eventing.Subscribe<BeforeStartEvent>((@event, _) =>
+        {
+            Assert.True(@event.Model.Resources.Remove(removed.Resource));
+            return Task.CompletedTask;
+        });
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal([NormalizeProjectPath(activePath)], buildResource.ProjectPaths);
+    }
+
+    [Fact]
+    public async Task ReplacedProjectIsExcludedFromMaterializedBuildPlan()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var activePath = CreateProject(workspace.Path, "Active", "Active.csproj");
+        var replacedPath = CreateProject(workspace.Path, "Replaced", "Replaced.csproj");
+        builder.AddDotnetProject("active", activePath, options => options.ExcludeLaunchProfile = true);
+        var replaced = builder.AddDotnetProject("replaced", replacedPath, options => options.ExcludeLaunchProfile = true);
+        builder.Eventing.Subscribe<BeforeStartEvent>((@event, _) =>
+        {
+            var index = @event.Model.Resources.IndexOf(replaced.Resource);
+            Assert.True(index >= 0);
+            @event.Model.Resources[index] = new ExecutableResource(replaced.Resource.Name, "dotnet", workspace.Path);
+            return Task.CompletedTask;
+        });
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal([NormalizeProjectPath(activePath)], buildResource.ProjectPaths);
+    }
+
+    [Fact]
+    public async Task RemovingEveryProjectRemovesBuildResourceAndFileAppDependency()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Project", "Project.csproj");
+        var filePath = Path.Combine(workspace.Path, "worker.cs");
+        File.WriteAllText(filePath, "System.Console.WriteLine(\"Hello\");");
+        var project = builder.AddDotnetProject("project", projectPath, options => options.ExcludeLaunchProfile = true);
+        var file = builder.AddDotnetProject("worker", filePath, options => options.ExcludeLaunchProfile = true);
+        var initialBuildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        builder.Eventing.Subscribe<BeforeStartEvent>((@event, _) =>
+        {
+            Assert.True(@event.Model.Resources.Remove(project.Resource));
+            return Task.CompletedTask;
+        });
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal(
+            Array.Empty<WaitAnnotation>(),
+            file.Resource.Annotations
+                .OfType<WaitAnnotation>()
+                .Where(annotation => ReferenceEquals(annotation.Resource, initialBuildResource))
+                .ToArray());
+        Assert.Equal(
+            Array.Empty<ResourceRelationshipAnnotation>(),
+            file.Resource.Annotations
+                .OfType<ResourceRelationshipAnnotation>()
+                .Where(annotation => ReferenceEquals(annotation.Resource, initialBuildResource))
+                .ToArray());
+    }
+
+    [Fact]
     public async Task ProjectsWithDifferentGlobalJsonRootsUseSerializedTraversalBuilds()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
@@ -382,9 +497,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             firstBuild =>
             {
                 Assert.Equal([NormalizeProjectPath(firstPath)], firstBuild.ProjectPaths);
-                Assert.Equal(
-                    PathNormalizer.ResolveSymlinks(Path.GetDirectoryName(firstPath)!),
-                    firstBuild.WorkingDirectory);
+                Assert.True(File.Exists(Path.Combine(firstBuild.WorkingDirectory, "global.json")));
                 Assert.EndsWith(".proj", buildTargets[0], StringComparison.Ordinal);
             },
             secondBuild =>
@@ -439,7 +552,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             linkedBuild =>
             {
                 Assert.Equal([NormalizeProjectPath(aliasProjectPath)], linkedBuild.ProjectPaths);
-                Assert.Equal(PathNormalizer.ResolveSymlinks(physicalRoot.FullName), linkedBuild.WorkingDirectory);
+                Assert.True(File.Exists(Path.Combine(linkedBuild.WorkingDirectory, "global.json")));
             },
             otherBuild =>
             {
@@ -1151,7 +1264,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         await builder.Eventing.PublishAsync(
                           new BeforeStartEvent(app.Services, model),
                           TestContext.Current.CancellationToken);
-        await coordinator.MaterializeBuildPlan(app.Services);
+        await coordinator.MaterializeBuildPlan(model, app.Services);
     }
 
     private static void AddExpectedConfiguration(IDistributedApplicationBuilder builder, List<string> expected)
