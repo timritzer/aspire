@@ -273,8 +273,8 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var api = builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true)
             .WithHttpEndpoint();
         var worker = builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
-            .WithReference(api)
-            .WithEnvironment("BUILD_FLAVOR", "custom");
+            .WithEnvironment("BUILD_FLAVOR", "custom")
+            .WithReference(api);
         await using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
@@ -347,6 +347,35 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true);
         builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
             .WithReference(connectionString);
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal(
+            [NormalizeProjectPath(apiPath), NormalizeProjectPath(workerPath)],
+            buildResource.ProjectPaths);
+    }
+
+    [Fact]
+    public async Task ProjectsWithResourceValuedEnvironmentReferencesShareTraversalBuild()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var apiPath = CreateProject(workspace.Path, "Api", "Api.csproj");
+        var workerPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var api = builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true)
+            .WithHttpEndpoint();
+        var parameter = builder.AddParameter("setting");
+        var connectionString = builder.AddConnectionString("database");
+        var externalService = builder.AddExternalService("external", "https://example.com/");
+        builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("API_ENDPOINT", api.GetEndpoint("http"))
+            .WithEnvironment("SETTING", parameter)
+            .WithEnvironment("DATABASE", connectionString)
+            .WithEnvironment("EXTERNAL_URL", externalService);
         await using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
@@ -444,6 +473,69 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task EnvironmentAddedByLaterBeforeStartFinalActionFailsBuildEvaluation()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true);
+        builder.Pipeline.WithFinalAction(
+            WellKnownPipelineSteps.BeforeStart,
+            _ =>
+            {
+                project.WithEnvironment("LATE_BUILD_FLAVOR", "custom");
+                return Task.CompletedTask;
+            });
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        var exception = await Assert.ThrowsAsync<DistributedApplicationException>(async () =>
+            await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+                buildResource,
+                serviceProvider: app.Services));
+        Assert.Contains("resource 'worker' changed after the coordinated build plan was materialized", exception.Message);
+        Assert.Contains("do not add or remove them after materialization", exception.Message);
+    }
+
+    [Fact]
+    public async Task EnvironmentAddedAfterInitialBuildFailsRebuildAndProjectEvaluation()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("BUILD_FLAVOR", "initial");
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            buildResource,
+            serviceProvider: app.Services);
+        project.WithEnvironment("LATE_BUILD_FLAVOR", "late");
+
+        var rebuilder = Assert.Single(builder.Resources.OfType<ProjectRebuilderResource>());
+        var rebuildException = await Assert.ThrowsAsync<DistributedApplicationException>(async () =>
+            await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+                rebuilder,
+                serviceProvider: app.Services));
+        var projectException = await Assert.ThrowsAsync<DistributedApplicationException>(async () =>
+            await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+                project.Resource,
+                serviceProvider: app.Services));
+
+        Assert.Contains("resource 'worker' changed after the coordinated build plan was materialized", rebuildException.Message);
+        Assert.Equal(rebuildException.Message, projectException.Message);
+    }
+
+    [Fact]
     public async Task ContextSpecificBuildEnvironmentCallbackIsEvaluatedOnceAndSharedWithRuntimeCallbacks()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
@@ -454,7 +546,6 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var callbackCount = 0;
         IResource? callbackResource = null;
         var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
-            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "runtime")
             .WithEnvironment(context =>
             {
                 callbackCount++;
@@ -466,6 +557,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
                         ? $"contaminated-{callbackCount}"
                         : $"custom-{callbackCount}";
             })
+            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "runtime")
             .WithRuntimeEnvironment(context =>
                 context.EnvironmentVariables["RUNTIME_BUILD_FLAVOR"] = context.EnvironmentVariables["BUILD_FLAVOR"]);
         await using var app = builder.Build();
@@ -499,7 +591,6 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
         var callbackCount = 0;
         var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
-            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "runtime")
             .WithEnvironment(context =>
             {
                 callbackCount++;
@@ -507,7 +598,8 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
                     context.EnvironmentVariables.ContainsKey("RUNTIME_ONLY")
                         ? $"contaminated-{callbackCount}"
                         : $"custom-{callbackCount}";
-            });
+            })
+            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "runtime");
         await using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
@@ -536,7 +628,37 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
-    public async Task ContextSpecificBuildEnvironmentReplayPreservesCallbackOrderAndRemovals()
+    public async Task InterleavedBuildAndRuntimeCallbacksAreRejected()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("SHARED", "build")
+            .WithEnvironment(context => context.EnvironmentVariables.Remove("REMOVED"))
+            .WithRuntimeEnvironment(context =>
+            {
+                context.EnvironmentVariables["SHARED"] = "runtime";
+                context.EnvironmentVariables["REMOVED"] = "runtime";
+            })
+            .WithEnvironment("SHARED", "build")
+            .WithEnvironment(context =>
+            {
+                context.EnvironmentVariables.Remove("REMOVED");
+            });
+        await using var app = builder.Build();
+
+        var exception = await Assert.ThrowsAsync<DistributedApplicationException>(
+            () => app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken));
+
+        Assert.Contains("resource 'worker' has a build-affecting environment callback registered after a runtime-only callback", exception.Message);
+        Assert.Contains("Configure build-affecting environment variables before runtime references", exception.Message);
+    }
+
+    [Fact]
+    public async Task ContiguousBuildEnvironmentReplayPreservesRemovals()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         using var builder = TestDistributedApplicationBuilder.Create(
@@ -544,14 +666,8 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             outputHelper);
         var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
         var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
-            .WithEnvironment("SHARED", "build-first")
             .WithEnvironment("TEMPORARY", "temporary")
-            .WithRuntimeEnvironment(context => context.EnvironmentVariables["SHARED"] = "runtime")
-            .WithEnvironment(context =>
-            {
-                context.EnvironmentVariables["SECOND"] = "build-second";
-                context.EnvironmentVariables.Remove("TEMPORARY");
-            });
+            .WithEnvironment(context => context.EnvironmentVariables.Remove("TEMPORARY"));
         await using var app = builder.Build();
 
         await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
@@ -564,17 +680,8 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             project.Resource,
             serviceProvider: app.Services);
 
-        Assert.Equal(["SECOND", "SHARED"], buildEnvironment.Keys.Order(StringComparer.Ordinal));
-        Assert.Equal("build-first", buildEnvironment["SHARED"]);
-        Assert.Equal("build-second", buildEnvironment["SECOND"]);
-
-        // The stand-ins replace the callbacks in place, so the runtime callback still overwrites the value the first
-        // build callback wrote and the removal performed by the last build callback still applies.
-        Assert.Equal(
-            ["SECOND", "SHARED"],
-            projectEnvironment.Keys.Where(key => key is "SHARED" or "SECOND" or "TEMPORARY").Order(StringComparer.Ordinal));
-        Assert.Equal("runtime", projectEnvironment["SHARED"]);
-        Assert.Equal("build-second", projectEnvironment["SECOND"]);
+        Assert.Equal(Array.Empty<string>(), buildEnvironment.Keys.Where(key => key == "TEMPORARY"));
+        Assert.Equal(Array.Empty<string>(), projectEnvironment.Keys.Where(key => key == "TEMPORARY"));
     }
 
     [Fact]
@@ -719,6 +826,47 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         Assert.Equal("from-profile", buildEnvironment["LAUNCH_ONLY"]);
         Assert.Equal("from-callback", buildEnvironment["OVERRIDDEN"]);
         Assert.Equal("from-callback", projectEnvironment["OVERRIDDEN"]);
+    }
+
+    [Fact]
+    public async Task LaunchProfileOnlyDirectBuildPublishesVariableNamesDuringMaterialization()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var propertiesDirectory = Directory.CreateDirectory(
+            Path.Combine(Path.GetDirectoryName(projectPath)!, "Properties"));
+        File.WriteAllText(Path.Combine(propertiesDirectory.FullName, "launchSettings.json"), """
+            {
+              "profiles": {
+                "worker": {
+                  "commandName": "Project",
+                  "environmentVariables": {
+                    "BUILD_FLAVOR": "from-profile"
+                  }
+                }
+              }
+            }
+            """);
+        var project = builder.AddDotnetProject("worker", projectPath);
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var callbackContext = LaunchConfigurationTestHelpers.CreateCallbackContext(
+            project.Resource,
+            ExecutableLaunchMode.Debug,
+            new Dictionary<string, string>
+            {
+                ["BUILD_FLAVOR"] = "from-profile",
+            },
+            TestContext.Current.CancellationToken);
+        var launchConfiguration = Assert.IsType<ProjectLaunchConfiguration>(
+            await project.Resource.CreateLaunchConfigurationAsync(callbackContext));
+        Assert.NotNull(launchConfiguration.BuildEnvironmentVariableNames);
+        Assert.Equal(["BUILD_FLAVOR"], launchConfiguration.BuildEnvironmentVariableNames);
     }
 
     [Fact]

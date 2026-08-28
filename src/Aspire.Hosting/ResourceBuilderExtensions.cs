@@ -457,7 +457,7 @@ public static class ResourceBuilderExtensions
 
         builder.WithReferenceRelationship(endpointReference.Resource);
 
-        return builder.WithEnvironment(context =>
+        return builder.WithRuntimeEnvironment(context =>
         {
             context.EnvironmentVariables[name] = endpointReference;
         });
@@ -483,11 +483,12 @@ public static class ResourceBuilderExtensions
 
         if (externalService.Resource.Uri is not null)
         {
-            builder.WithEnvironment(name, externalService.Resource.Uri.ToString());
+            builder.WithRuntimeEnvironment(context =>
+                context.EnvironmentVariables[name] = externalService.Resource.Uri.ToString());
         }
         else if (externalService.Resource.UrlParameter is not null)
         {
-            builder.WithEnvironment(async context =>
+            builder.WithRuntimeEnvironment(async context =>
             {
                 // In publish mode we can't validate the parameter value so we'll just use it without validating.
                 if (!context.ExecutionContext.IsPublishMode)
@@ -523,7 +524,7 @@ public static class ResourceBuilderExtensions
 
         builder.WithReferenceRelationship(parameter.Resource);
 
-        return builder.WithEnvironment(context =>
+        return builder.WithRuntimeEnvironment(context =>
         {
             context.EnvironmentVariables[name] = parameter.Resource;
         });
@@ -550,7 +551,7 @@ public static class ResourceBuilderExtensions
 
         builder.WithReferenceRelationship(resource.Resource);
 
-        return builder.WithEnvironment(context =>
+        return builder.WithRuntimeEnvironment(context =>
         {
             context.EnvironmentVariables[envVarName] = new ConnectionStringReference(resource.Resource, optional: false);
         });

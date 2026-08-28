@@ -2341,6 +2341,32 @@ public class DistributedApplicationPipelineTests(ITestOutputHelper testOutputHel
     }
 
     [Fact]
+    public async Task WithFinalAction_WithDuplicateStepNames_UsesPipelineValidationDiagnostic()
+    {
+        using var builder = CreatePipelineTestBuilder();
+        var pipeline = new DistributedApplicationPipeline();
+        builder.AddResource(new CustomResource("resource1"))
+            .WithPipelineStepFactory(_ => new PipelineStep
+            {
+                Name = "duplicate-step",
+                Action = _ => Task.CompletedTask,
+            });
+        builder.AddResource(new CustomResource("resource2"))
+            .WithPipelineStepFactory(_ => new PipelineStep
+            {
+                Name = "duplicate-step",
+                Action = _ => Task.CompletedTask,
+            });
+        pipeline.WithFinalAction("duplicate-step", _ => Task.CompletedTask);
+        using var app = builder.Build();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => pipeline.ResolveStepsAsync(CreateDeployingContext(app))).DefaultTimeout();
+
+        Assert.Equal("Duplicate step name: 'duplicate-step'", exception.Message);
+    }
+
+    [Fact]
     public async Task ResolveStepsAsync_NormalizesRequiredByToDependsOn()
     {
         using var builder = CreatePipelineTestBuilder();

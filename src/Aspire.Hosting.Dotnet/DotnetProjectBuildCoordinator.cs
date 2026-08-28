@@ -312,6 +312,17 @@ internal static class DotnetProjectBuildCoordinator
             projectEntries = projectEntries
                 .Where(entry => File.Exists(entry.Metadata.ProjectPath))
                 .ToArray();
+            var interleavedEntry = projectEntries
+                .Where(HasInterleavedBuildAndRuntimeCallbacks)
+                .FirstOrDefault();
+            if (interleavedEntry is not null)
+            {
+                throw new DistributedApplicationException(
+                    $"The .NET project resource '{interleavedEntry.Registration.Resource.Name}' has a build-affecting " +
+                    "environment callback registered after a runtime-only callback. The coordinated build cannot " +
+                    "preserve that callback ordering. Configure build-affecting environment variables before runtime " +
+                    "references and runtime-only environment callbacks.");
+            }
 
             if (projectEntries.Length == 0)
             {
@@ -365,6 +376,7 @@ internal static class DotnetProjectBuildCoordinator
                         buildResource.ConfigureTraversalBuild(
                             step.Projects.Select(entry => entry.Metadata.ProjectPath),
                             step.WorkingDirectory);
+                        rollbackActions.Push(ValidateMaterializedBuildCallbacks(buildResource, step.Projects));
                     }
                     else
                     {
@@ -375,12 +387,26 @@ internal static class DotnetProjectBuildCoordinator
                         // configuration, and the project itself, so the user callbacks run once and every consumer
                         // observes identical build variables.
                         var sharedBuildEnvironment = new SharedBuildEnvironment(entry);
+                        if (sharedBuildEnvironment.Callbacks.Count == 0)
+                        {
+                            entry.Metadata.SetBuildEnvironmentVariableNames(entry.Registration.LaunchProfileEnvironment.Keys);
+                        }
                         rollbackActions.Push(ReplaceProjectBuildCallbacks(sharedBuildEnvironment));
+                        rollbackActions.Push(ValidateMaterializedBuildCallbacks(buildResource, step.Projects));
                         rollbackActions.Push(ApplyBuildEnvironment(buildResource, sharedBuildEnvironment));
                         if (FindRebuilder(model, entry.Registration.Resource) is { } rebuilder)
                         {
+                            rollbackActions.Push(ValidateMaterializedBuildCallbacks(rebuilder, step.Projects));
                             rollbackActions.Push(ApplyBuildEnvironment(rebuilder, sharedBuildEnvironment));
                         }
+                    }
+
+                    foreach (var entry in step.Projects)
+                    {
+                        rollbackActions.Push(ValidateMaterializedBuildCallbacks(
+                            entry.Registration.Resource,
+                            [entry],
+                            runtimeOnly: true));
                     }
 
                     buildResource.RegisterForShutdown(applicationLifetime);
@@ -523,6 +549,42 @@ internal static class DotnetProjectBuildCoordinator
             return () => target.Annotations.Remove(annotation);
         }
 
+        private static Action ValidateMaterializedBuildCallbacks(
+            IResource target,
+            IEnumerable<ProjectEntry> entries,
+            bool runtimeOnly = false)
+        {
+            var snapshots = entries
+                .Select(entry => new BuildCallbackSnapshot(
+                    entry,
+                    GetContextSpecificBuildCallbacks(entry.Registration).ToArray()))
+                .ToArray();
+            void Validate(EnvironmentCallbackContext _)
+            {
+                foreach (var snapshot in snapshots)
+                {
+                    var currentCallbacks = GetContextSpecificBuildCallbacks(snapshot.Entry.Registration);
+                    if (!currentCallbacks.SequenceEqual(
+                        snapshot.Callbacks,
+                        ReferenceEqualityComparer.Instance))
+                    {
+                        throw new DistributedApplicationException(
+                            $"The build environment of .NET project resource '{snapshot.Entry.Registration.Resource.Name}' " +
+                            "changed after the coordinated build plan was materialized. Configure build-affecting " +
+                            "environment variables while constructing the AppHost or in a pipeline step required by " +
+                            "BeforeStart; do not add or remove them after materialization.");
+                    }
+                }
+            }
+
+            EnvironmentCallbackAnnotation annotation = runtimeOnly
+                ? new RuntimeEnvironmentCallbackAnnotation(Validate)
+                : new EnvironmentCallbackAnnotation(Validate);
+            target.Annotations.Add(annotation);
+
+            return () => target.Annotations.Remove(annotation);
+        }
+
         /// <summary>
         /// Replaces each build-relevant callback on the project with an in-place stand-in that replays what the
         /// coordinated evaluation recorded for that callback.
@@ -612,6 +674,32 @@ internal static class DotnetProjectBuildCoordinator
                                 !registration.BaselineEnvironmentCallbacks.Contains(callback))
                 : [];
 
+        private static bool HasInterleavedBuildAndRuntimeCallbacks(ProjectEntry entry)
+        {
+            var buildCallbacks = GetContextSpecificBuildCallbacks(entry.Registration)
+                .ToHashSet(ReferenceEqualityComparer.Instance);
+            if (buildCallbacks.Count == 0 ||
+                !entry.Registration.Resource.TryGetEnvironmentVariables(out var environmentCallbacks))
+            {
+                return false;
+            }
+
+            var encounteredRuntimeCallback = false;
+            foreach (var callback in environmentCallbacks)
+            {
+                if (callback is RuntimeEnvironmentCallbackAnnotation)
+                {
+                    encounteredRuntimeCallback = true;
+                }
+                else if (encounteredRuntimeCallback && buildCallbacks.Contains(callback))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private readonly record struct BuildContext(string? GlobalJsonPath, string? Configuration);
 
         /// <summary>
@@ -645,8 +733,8 @@ internal static class DotnetProjectBuildCoordinator
             /// Gets the project callbacks that contribute to the coordinated build, in registration order.
             /// </summary>
             /// <remarks>
-            /// Build-plan materialization is the final action of BeforeStart, so this snapshot includes every callback
-            /// that can affect the coordinated initial build without admitting later runtime mutations.
+            /// The build resource validates this materialized snapshot before evaluating it, so a later mutation cannot
+            /// silently produce output that differs from the project launch environment.
             /// </remarks>
             public IReadOnlyList<EnvironmentCallbackAnnotation> Callbacks { get; }
 
@@ -750,10 +838,10 @@ internal static class DotnetProjectBuildCoordinator
         /// <remarks>
         /// Only the changes are recorded, never the whole environment: replaying a full snapshot onto the project would
         /// also overwrite variables that runtime-only callbacks own, such as an endpoint-derived ASPNETCORE_URLS that
-        /// deliberately supersedes the launch profile value. A callback that writes a value the build environment
-        /// already held contributes nothing, which is intentional - that value is either seeded from the launch profile
-        /// (and applied to the project by its own launch profile handling) or already replayed by the earlier callback
-        /// that produced it.
+        /// deliberately supersedes the launch profile value. Projects with a runtime callback before a build callback
+        /// are rejected during materialization, so all replayed callbacks form one contiguous build-only sequence.
+        /// Within that sequence, a callback that writes a value the build environment already held contributes nothing:
+        /// the launch profile or an earlier replay already supplied the same value without an intervening callback.
         /// </remarks>
         private sealed record BuildEnvironmentContribution(
             KeyValuePair<string, object>[] AssignedVariables,
@@ -789,6 +877,10 @@ internal static class DotnetProjectBuildCoordinator
         private sealed record ProjectEntry(
             ResourceRegistration Registration,
             DotnetProjectMetadata Metadata);
+
+        private sealed record BuildCallbackSnapshot(
+            ProjectEntry Entry,
+            EnvironmentCallbackAnnotation[] Callbacks);
 
         private sealed record ResourceRegistration(
             DotnetProjectResource Resource,

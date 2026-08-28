@@ -48,8 +48,8 @@ class TestDotNetService {
         return this.getDotNetTargetPathStub(projectFile, buildConfiguration, environment);
     }
 
-    buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void> {
-        return this.buildDotNetProjectStub(projectFile, buildConfiguration);
+    buildDotNetProject(projectFile: string, buildConfiguration?: string, environment?: NodeJS.ProcessEnv): Promise<void> {
+        return this.buildDotNetProjectStub(projectFile, buildConfiguration, environment);
     }
 
     getAndActivateDevKit(): Promise<boolean> {
@@ -530,6 +530,50 @@ suite('Dotnet Debugger Extension Tests', () => {
         }
     });
 
+    test('dotnet build removes differently-cased ambient variables on Windows', async () => {
+        const platformStub = sinon.stub(process, 'platform').value('win32');
+        const ambientName = 'Aspire_Test_Build_Case';
+        const resourceName = ambientName.toUpperCase();
+        const normalizedName = ambientName.toLowerCase();
+        const inheritedEntries = Object.entries(process.env)
+            .filter(([name]) => name.toLowerCase() === normalizedName);
+        for (const [name] of inheritedEntries) {
+            delete process.env[name];
+        }
+        process.env[ambientName] = 'ambient';
+
+        try {
+            sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+            const buildProcess = Object.assign(new EventEmitter(), {
+                stdout: new EventEmitter(),
+                stderr: new EventEmitter()
+            });
+            const spawnStub = sinon.stub(childProcess, 'spawn').callsFake(() => {
+                setImmediate(() => buildProcess.emit('close', 0));
+                return buildProcess as unknown as childProcess.ChildProcessWithoutNullStreams;
+            });
+            const service = new DotNetService({} as AspireDebugSession);
+
+            await service.buildDotNetProject('/workspace/app.csproj', 'Debug', {
+                [resourceName]: 'resource'
+            });
+
+            const matchingEntries = Object.entries(spawnStub.firstCall.args[2]?.env ?? {})
+                .filter(([name]) => name.toLowerCase() === normalizedName);
+            assert.deepStrictEqual(matchingEntries, [[resourceName, 'resource']]);
+        } finally {
+            platformStub.restore();
+            for (const name of Object.keys(process.env)) {
+                if (name.toLowerCase() === normalizedName) {
+                    delete process.env[name];
+                }
+            }
+            for (const [name, value] of inheritedEntries) {
+                process.env[name] = value;
+            }
+        }
+    });
+
     test('target path property evaluation does not reintroduce a stale differently-cased AspireCliPath on Windows', async () => {
         const platformStub = sinon.stub(process, 'platform').value('win32');
         sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: 'aspire', available: true, source: 'path' });
@@ -642,6 +686,54 @@ suite('Dotnet Debugger Extension Tests', () => {
             'true');
     });
 
+    test('dotnet run-api removes differently-cased ambient variables on Windows', async () => {
+        const platformStub = sinon.stub(process, 'platform').value('win32');
+        const ambientName = 'Aspire_Test_Run_Api_Case';
+        const resourceName = ambientName.toUpperCase();
+        const normalizedName = ambientName.toLowerCase();
+        const inheritedEntries = Object.entries(process.env)
+            .filter(([name]) => name.toLowerCase() === normalizedName);
+        for (const [name] of inheritedEntries) {
+            delete process.env[name];
+        }
+        process.env[ambientName] = 'ambient';
+
+        try {
+            sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+            const stdout = new PassThrough();
+            const child = Object.assign(new EventEmitter(), {
+                stdin: new PassThrough(),
+                stdout,
+                stderr: new PassThrough(),
+                kill: sinon.stub()
+            });
+            const spawnStub = sinon.stub(childProcess, 'spawn').returns(
+                child as unknown as childProcess.ChildProcessWithoutNullStreams);
+            const service = new DotNetService({} as AspireDebugSession);
+
+            const response = service.getDotNetRunApiOutput(
+                '/workspace/app.cs',
+                { [resourceName]: 'resource' });
+            await new Promise<void>(resolve => setImmediate(resolve));
+            stdout.write('{"$type":"RunCommand"}\n');
+            await response;
+
+            const matchingEntries = Object.entries(spawnStub.firstCall.args[2]?.env ?? {})
+                .filter(([name]) => name.toLowerCase() === normalizedName);
+            assert.deepStrictEqual(matchingEntries, [[resourceName, 'resource']]);
+        } finally {
+            platformStub.restore();
+            for (const name of Object.keys(process.env)) {
+                if (name.toLowerCase() === normalizedName) {
+                    delete process.env[name];
+                }
+            }
+            for (const [name, value] of inheritedEntries) {
+                process.env[name] = value;
+            }
+        }
+    });
+
     test('file-app run properties use build configuration as a global property and parse the machine-readable response', async () => {
         const projectPath = nodePath.join(process.cwd(), '.test-temp', 'configured-file-app', 'app.cs');
         const resolvedEnv = { MARKER: 'resolved-env' } as unknown as NodeJS.ProcessEnv;
@@ -683,6 +775,53 @@ suite('Dotnet Debugger Extension Tests', () => {
         assert.strictEqual(
             createResolvedEnvStub.firstCall.args[1]?.ASPIRE_SUPPRESS_CLI_RUN_HOOK,
             'true');
+    });
+
+    test('file-app run properties remove differently-cased ambient variables on Windows', async () => {
+        const platformStub = sinon.stub(process, 'platform').value('win32');
+        const ambientName = 'Aspire_Test_File_App_Case';
+        const resourceName = ambientName.toUpperCase();
+        const normalizedName = ambientName.toLowerCase();
+        const inheritedEntries = Object.entries(process.env)
+            .filter(([name]) => name.toLowerCase() === normalizedName);
+        for (const [name] of inheritedEntries) {
+            delete process.env[name];
+        }
+        process.env[ambientName] = 'ambient';
+
+        try {
+            sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+            const createResolvedEnvStub = sinon.stub(cliPathEnvironmentModule, 'createResolvedAspireCliPathProcessEnvironment').returns({});
+            sinon.stub(childProcess, 'execFile').yields(null, {
+                stdout: JSON.stringify({
+                    Properties: {
+                        RunCommand: '/workspace/bin/Debug/app',
+                        RunArguments: ''
+                    }
+                }),
+                stderr: ''
+            });
+            const service = new DotNetService({} as AspireDebugSession);
+
+            await service.getDotNetFileAppRunProperties(
+                '/workspace/app.cs',
+                'Debug',
+                { [resourceName]: 'resource' });
+
+            const matchingEntries = Object.entries(createResolvedEnvStub.firstCall.args[1] ?? {})
+                .filter(([name]) => name.toLowerCase() === normalizedName);
+            assert.deepStrictEqual(matchingEntries, [[resourceName, 'resource']]);
+        } finally {
+            platformStub.restore();
+            for (const name of Object.keys(process.env)) {
+                if (name.toLowerCase() === normalizedName) {
+                    delete process.env[name];
+                }
+            }
+            for (const [name, value] of inheritedEntries) {
+                process.env[name] = value;
+            }
+        }
     });
 
     test('file-app run properties reject missing and malformed machine-readable responses', async () => {
@@ -819,6 +958,47 @@ suite('Dotnet Debugger Extension Tests', () => {
             /expected prebuilt output .* does not exist.*building is suppressed/i);
 
         assert.ok(dotNetService.buildDotNetProjectStub.notCalled);
+    });
+
+    test('project fallback build uses the environment selected for target path evaluation', async () => {
+        const outputPath = 'C:\\temp\\bin\\custom\\Release\\net10.0\\TestProject.dll';
+        const { extension, dotNetService } = createDebuggerExtension(outputPath, null, true, false);
+        const projectPath = 'C:\\temp\\TestProject.csproj';
+        const launchConfig: ProjectLaunchConfiguration = {
+            type: 'project',
+            project_path: projectPath,
+            build_configuration: 'Release',
+            build_environment_variable_names: ['BUILD_FLAVOR']
+        };
+        const debugConfig: AspireResourceExtendedDebugConfiguration = {
+            runId: '1',
+            debugSessionId: '1',
+            type: 'coreclr',
+            name: 'Test Debug Config',
+            request: 'launch'
+        };
+        const fakeAspireDebugSession = sinon.createStubInstance(AspireDebugSession);
+
+        await extension.createDebugSessionConfigurationCallback!(
+            launchConfig,
+            [],
+            [
+                { name: 'BUILD_FLAVOR', value: 'custom' },
+                { name: 'RUNTIME_ONLY', value: 'not-for-msbuild' }
+            ],
+            { debug: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession },
+            debugConfig);
+
+        const buildEnvironment = { BUILD_FLAVOR: 'custom' };
+        assert.ok(dotNetService.getDotNetTargetPathStub.calledOnceWith(
+            projectPath,
+            'Release',
+            buildEnvironment));
+        assert.ok(dotNetService.buildDotNetProjectStub.calledOnceWith(
+            projectPath,
+            'Release',
+            buildEnvironment));
+        assert.strictEqual(debugConfig.program, outputPath);
     });
 
     test('project debug configuration is byte-identical whether or not C# Dev Kit is installed', async () => {
@@ -3230,7 +3410,8 @@ suite('Dotnet Debugger Extension Tests', () => {
         const launchConfig: ProjectLaunchConfiguration = {
             type: 'project',
             project_path: projectPath,
-            launch_profile: 'Aspire_my-function'
+            launch_profile: 'Aspire_my-function',
+            build_environment_variable_names: ['BUILD_FLAVOR']
         };
 
         const debugConfig: AspireResourceExtendedDebugConfiguration = {
@@ -3243,7 +3424,15 @@ suite('Dotnet Debugger Extension Tests', () => {
 
         const fakeAspireDebugSession = sinon.createStubInstance(AspireDebugSession);
 
-        await extension.createDebugSessionConfigurationCallback!(launchConfig, undefined, [], { debug: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession }, debugConfig);
+        await extension.createDebugSessionConfigurationCallback!(
+            launchConfig,
+            undefined,
+            [
+                { name: 'BUILD_FLAVOR', value: 'custom' },
+                { name: 'RUNTIME_ONLY', value: 'not-for-msbuild' }
+            ],
+            { debug: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession },
+            debugConfig);
 
         // program should be the executable path from the profile, NOT the project output DLL
         assert.strictEqual(debugConfig.program, 'dotnet');
@@ -3258,7 +3447,10 @@ suite('Dotnet Debugger Extension Tests', () => {
         assert.strictEqual(debugConfig.env.FUNCTION_ENV, 'test');
 
         // project should still be built (to compile the class library dependencies)
-        assert.strictEqual(dotNetService.buildDotNetProjectStub.calledOnce, true);
+        assert.ok(dotNetService.buildDotNetProjectStub.calledOnceWith(
+            projectPath,
+            undefined,
+            { BUILD_FLAVOR: 'custom' }));
 
         // cleanup
         removeDirectorySafely(tempDir);

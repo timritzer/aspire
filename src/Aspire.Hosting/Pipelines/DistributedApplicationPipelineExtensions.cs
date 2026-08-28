@@ -22,7 +22,9 @@ public static class DistributedApplicationPipelineExtensions
     /// Thrown when <paramref name="pipeline"/> or <paramref name="action"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">Thrown when <paramref name="stepName"/> is null or empty.</exception>
-    /// <exception cref="InvalidOperationException">Thrown when the named step does not exist.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown during pipeline resolution when the named step does not exist.
+    /// </exception>
     /// <remarks>
     /// The final action is configured when the pipeline graph is resolved, so it runs after dependencies
     /// added by resource annotations and other pipeline configuration callbacks. Multiple final actions
@@ -41,7 +43,7 @@ public static class DistributedApplicationPipelineExtensions
 
         pipeline.AddPipelineConfiguration(context =>
         {
-            var step = context.Steps.SingleOrDefault(candidate => candidate.Name == stepName);
+            var step = context.Steps.FirstOrDefault(candidate => candidate.Name == stepName);
             if (step is null)
             {
                 var availableSteps = string.Join(", ", context.Steps.Select(candidate => $"'{candidate.Name}'"));
@@ -73,7 +75,7 @@ public static class DistributedApplicationPipelineExtensions
 
         pipeline.AddPipelineConfiguration(static context =>
         {
-            var validationStep = context.Steps.SingleOrDefault(step => step.Name == DistributedApplicationPipeline.ValidateBuildOnlyContainerReferencesStepName);
+            var validationStep = context.Steps.FirstOrDefault(step => step.Name == DistributedApplicationPipeline.ValidateBuildOnlyContainerReferencesStepName);
             validationStep?.RequiredBySteps.Clear();
             return Task.CompletedTask;
         });

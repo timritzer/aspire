@@ -35,7 +35,7 @@ import { getAppHostLaunchProfileOptions } from '../../utils/launchProfile';
 
 interface IDotNetService {
     getAndActivateDevKit(): Promise<boolean>
-    buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void>;
+    buildDotNetProject(projectFile: string, buildConfiguration?: string, environment?: NodeJS.ProcessEnv): Promise<void>;
     getDotNetTargetPath(projectFile: string, buildConfiguration?: string, environment?: NodeJS.ProcessEnv): Promise<string>;
     getDotNetRunApiOutput(projectFile: string, environment?: NodeJS.ProcessEnv): Promise<string>;
     getDotNetFileAppRunProperties(projectFile: string, buildConfiguration: string, environment?: NodeJS.ProcessEnv): Promise<DotNetFileAppRunProperties>;
@@ -44,6 +44,17 @@ interface IDotNetService {
 interface DotNetFileAppRunProperties {
     runCommand: string;
     runArguments: string;
+}
+
+function createDotNetProcessEnvironment(
+    resolvedCliPath: string | undefined,
+    environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const processEnvironment = { ...process.env };
+    for (const [name, value] of Object.entries(environment ?? {})) {
+        setEnvironmentVariable(processEnvironment, name, value);
+    }
+
+    return createResolvedAspireCliPathProcessEnvironment(resolvedCliPath, processEnvironment);
 }
 
 export class DotNetService implements IDotNetService {
@@ -75,7 +86,7 @@ export class DotNetService implements IDotNetService {
         return Promise.resolve(true);
     }
 
-    async buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void> {
+    async buildDotNetProject(projectFile: string, buildConfiguration?: string, environment?: NodeJS.ProcessEnv): Promise<void> {
         return new Promise<void>((resolve, reject) => {
             extensionLogOutputChannel.info(`Building .NET project: ${projectFile} using dotnet CLI`);
 
@@ -91,7 +102,7 @@ export class DotNetService implements IDotNetService {
                     // project argument. Run from the project directory so extension and CLI builds select
                     // the same SDK and repository configuration.
                     cwd: path.dirname(projectFile),
-                    env: createResolvedAspireCliPathProcessEnvironment(cliPath)
+                    env: createDotNetProcessEnvironment(cliPath, environment)
                 });
 
                 let stdoutOutput = '';
@@ -147,15 +158,10 @@ export class DotNetService implements IDotNetService {
 
         try {
             const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectFile)));
-            const propertyEnvironment = { ...process.env };
-            for (const [name, value] of Object.entries(environment ?? {})) {
-                setEnvironmentVariable(propertyEnvironment, name, value);
-            }
-            const processEnvironment = createResolvedAspireCliPathProcessEnvironment(cliPath, propertyEnvironment);
             const { stdout } = await this.execFileAsync('dotnet', args, {
                 cwd: path.dirname(projectFile),
                 encoding: 'utf8',
-                env: processEnvironment
+                env: createDotNetProcessEnvironment(cliPath, environment)
             });
             const output = stdout.trim();
             if (!output) {
@@ -183,11 +189,10 @@ export class DotNetService implements IDotNetService {
         let stdout: string;
         try {
             const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectFile)));
-            const propertyEnvironment = { ...process.env, ...environment };
             ({ stdout } = await this.execFileAsync('dotnet', args, {
                 cwd: path.dirname(projectFile),
                 encoding: 'utf8',
-                env: createResolvedAspireCliPathProcessEnvironment(cliPath, propertyEnvironment)
+                env: createDotNetProcessEnvironment(cliPath, environment)
             }));
         } catch (err) {
             throw new Error(buildFailedForProjectWithError(projectFile, String(err)));
@@ -238,11 +243,9 @@ export class DotNetService implements IDotNetService {
             try {
                 extensionLogOutputChannel.info('dotnet run-api - starting process');
 
-                const runApiEnvironment = { ...process.env, ...environment };
-
                 childProcess = spawn('dotnet', ['run-api'], {
                     cwd: path.dirname(projectPath),
-                    env: createResolvedAspireCliPathProcessEnvironment(cliPath, runApiEnvironment),
+                    env: createDotNetProcessEnvironment(cliPath, environment),
                     stdio: ['pipe', 'pipe', 'pipe']
                 });
 
@@ -873,6 +876,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
             const isFileBasedProject = isFileBasedApp(projectPath);
             const buildConfiguration = launchConfig.build_configuration;
             const suppressBuild = launchConfig.suppress_build === true;
+            const buildEnvironment = getBuildEnvironment(env, launchConfig.build_environment_variable_names);
             // Classic AppHost builds and coordinated project builds can both produce output before this launch
             // and suppress extension-owned builds. File-based AppHosts use forceBuild=false after the CLI builds them.
             // Newer CLIs build file-based AppHosts before asking the extension to launch them. Keep
@@ -1001,7 +1005,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                 // Expand environment variable references (e.g. $(HOME)) that VS handles natively
                 // but aren't expanded by the coreclr debugger.
                 if (shouldBuildProject) {
-                    await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
+                    await dotNetService.buildDotNetProject(projectPath, buildConfiguration, buildEnvironment);
                 }
 
                 debugConfiguration.program = expandEnvironmentVariables(baseProfile.executablePath);
@@ -1018,7 +1022,6 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
             }
             else if (!isFileBasedProject) {
                 const dotNetService: IDotNetService = dotNetServiceProducer(launchOptions.debugSession);
-                const buildEnvironment = getBuildEnvironment(env, launchConfig.build_environment_variable_names);
                 const outputPath = await dotNetService.getDotNetTargetPath(projectPath, buildConfiguration, buildEnvironment);
                 const outputExists = await doesFileExist(outputPath);
                 if (!outputExists && suppressBuild) {
@@ -1026,7 +1029,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                 }
 
                 if (!suppressBuild && (!outputExists || launchOptions.forceBuild)) {
-                    await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
+                    await dotNetService.buildDotNetProject(projectPath, buildConfiguration, buildEnvironment);
                 }
 
                 if (await shouldLaunchProjectWithDotNetRun(outputPath)) {
@@ -1080,7 +1083,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
 
                     if (shouldBuildProject) {
                         // There may be an older cached version of the file-based app, so force a build.
-                        await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
+                        await dotNetService.buildDotNetProject(projectPath, buildConfiguration, buildEnvironment);
                     }
 
                     const projectDirectory = path.dirname(projectPath);
@@ -1106,7 +1109,11 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
                     // file-based app itself and can be trusted.
                     // The Aspire SDK run hook would rewrite an AppHost RunCommand to `aspire run`, but the CLI
                     // already owns this launch. Suppress the hook so run-api returns the generated executable.
-                    const runApiEnvironment = launchOptions.isApphost ? { ASPIRE_SUPPRESS_CLI_RUN_HOOK: 'true' } : undefined;
+                    let runApiEnvironment = buildEnvironment ? { ...buildEnvironment } : undefined;
+                    if (launchOptions.isApphost) {
+                        runApiEnvironment ??= {};
+                        setEnvironmentVariable(runApiEnvironment, 'ASPIRE_SUPPRESS_CLI_RUN_HOOK', 'true');
+                    }
                     const runApiOutput = await dotNetService.getDotNetRunApiOutput(projectPath, runApiEnvironment);
                     const runApiConfig = getRunApiConfigFromOutput(runApiOutput);
                     const configuredRunProperties = buildConfiguration
@@ -1115,7 +1122,7 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
 
                     if (shouldBuildProject) {
                         // There may be an older cached version of the file-based app, so force a build.
-                        await dotNetService.buildDotNetProject(projectPath, buildConfiguration);
+                        await dotNetService.buildDotNetProject(projectPath, buildConfiguration, buildEnvironment);
                     }
 
                     const executablePath = configuredRunProperties?.runCommand ?? runApiConfig.executablePath;
