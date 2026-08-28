@@ -58,7 +58,7 @@ public class PipelineExecutorTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    public async Task FinalActionRunsAfterDependenciesAddedByLaterConfigurationCallback()
+    public async Task FinalActionsCoexistAndRunAfterDependenciesAddedByLaterConfigurationCallback()
     {
         var executionOrder = new List<string>();
         using var builder = TestDistributedApplicationBuilder.Create();
@@ -71,14 +71,14 @@ public class PipelineExecutorTests(ITestOutputHelper testOutputHelper)
                 return Task.CompletedTask;
             },
         });
-        builder.Pipeline.AddPipelineConfiguration(context =>
+        builder.Pipeline.WithFinalAction(WellKnownPipelineSteps.BeforeStart, _ =>
         {
-            var beforeStart = context.Steps.Single(step => step.Name == WellKnownPipelineSteps.BeforeStart);
-            beforeStart.SetFinalAction(_ =>
-            {
-                executionOrder.Add("final");
-                return Task.CompletedTask;
-            });
+            executionOrder.Add("first-final");
+            return Task.CompletedTask;
+        });
+        builder.Pipeline.WithFinalAction(WellKnownPipelineSteps.BeforeStart, _ =>
+        {
+            executionOrder.Add("second-final");
             return Task.CompletedTask;
         });
         builder.Pipeline.AddPipelineConfiguration(context =>
@@ -91,7 +91,7 @@ public class PipelineExecutorTests(ITestOutputHelper testOutputHelper)
 
         await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(["dependency", "final"], executionOrder);
+        Assert.Equal(["dependency", "first-final", "second-final"], executionOrder);
     }
 
 #pragma warning disable CS0618 // Lifecycle hooks are obsolete, but inspection must not invoke existing hooks.

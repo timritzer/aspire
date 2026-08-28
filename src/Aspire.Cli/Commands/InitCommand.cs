@@ -33,6 +33,7 @@ namespace Aspire.Cli.Commands;
 internal sealed class InitCommand : BaseCommand
 {
     private const string AspireDirectoryGitIgnoreEntry = ".aspire/\n";
+    private static readonly TimeSpan s_atomicWriteTemporaryFileRetentionPeriod = TimeSpan.FromHours(24);
 
     internal override HelpGroup HelpGroup => HelpGroup.AppCommands;
 
@@ -363,6 +364,8 @@ internal sealed class InitCommand : BaseCommand
             path = fileInfo.ResolveLinkTarget(returnFinalTarget: true)!.FullName;
         }
 
+        ReclaimStaleAtomicWriteTemporaryFiles(path);
+
         if (File.Exists(path))
         {
             // Atomic rename is governed by directory permissions on Unix and could otherwise replace
@@ -420,6 +423,77 @@ internal sealed class InitCommand : BaseCommand
                 // Preserve the write or move failure for the same reason as an I/O cleanup failure.
             }
         }
+    }
+
+    private static void ReclaimStaleAtomicWriteTemporaryFiles(string path)
+    {
+        var destination = new FileInfo(path);
+        var temporaryFilePrefix = destination.Name + ".tmp-";
+        var cutoff = DateTime.UtcNow - s_atomicWriteTemporaryFileRetentionPeriod;
+        string[] siblings;
+
+        try
+        {
+            siblings = Directory.GetFiles(destination.DirectoryName!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return;
+        }
+
+        foreach (var sibling in siblings)
+        {
+            var fileName = Path.GetFileName(sibling);
+            if (!IsAtomicWriteTemporaryFileName(fileName, temporaryFilePrefix))
+            {
+                continue;
+            }
+
+            try
+            {
+                var attributes = File.GetAttributes(sibling);
+                if ((attributes & FileAttributes.ReparsePoint) != 0 ||
+                    File.GetLastWriteTimeUtc(sibling) > cutoff)
+                {
+                    continue;
+                }
+
+                // A writer owns its temporary file with FileShare.None. Opening the same way both
+                // proves that no writer still owns the candidate and lets DeleteOnClose remove it
+                // without a close-then-delete race. The age guard also protects the brief interval
+                // after a writer closes the stream and before it publishes the file with File.Move.
+                using var stream = new FileStream(
+                    sibling,
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 1,
+                    FileOptions.DeleteOnClose);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                // Reclamation is best effort and must not replace the destination write's exception.
+            }
+        }
+    }
+
+    private static bool IsAtomicWriteTemporaryFileName(string fileName, string temporaryFilePrefix)
+    {
+        if (!fileName.StartsWith(temporaryFilePrefix, StringComparison.Ordinal) ||
+            fileName.Length != temporaryFilePrefix.Length + 32)
+        {
+            return false;
+        }
+
+        foreach (var character in fileName.AsSpan(temporaryFilePrefix.Length))
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private async Task<int> DropCSharpProjectSkeletonAsync(FileInfo solutionFile, CancellationToken cancellationToken)

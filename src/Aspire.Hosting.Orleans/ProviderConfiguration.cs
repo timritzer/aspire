@@ -61,11 +61,16 @@ internal sealed class ProviderConfiguration(string providerType, string? service
     public void ConfigureResource<T>(IResourceBuilder<T> resourceBuilder, string configurationSectionName) where T : IResourceWithEnvironment
     {
         var envVarPrefix = configurationSectionName.Replace(":", "__");
-        resourceBuilder.WithEnvironment($"Orleans__{envVarPrefix}__ProviderType", _providerType);
-        if (!string.IsNullOrEmpty(serviceKey))
+#pragma warning disable ASPIREENVIRONMENT001 // Reference values are runtime-only.
+        resourceBuilder.WithRuntimeEnvironment(context =>
         {
-            resourceBuilder.WithEnvironment($"Orleans__{envVarPrefix}__ServiceKey", serviceKey);
-        }
+            context.EnvironmentVariables[$"Orleans__{envVarPrefix}__ProviderType"] = _providerType;
+            if (!string.IsNullOrEmpty(serviceKey))
+            {
+                context.EnvironmentVariables[$"Orleans__{envVarPrefix}__ServiceKey"] = serviceKey;
+            }
+        });
+#pragma warning restore ASPIREENVIRONMENT001
 
         if (resource is not null)
         {

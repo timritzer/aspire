@@ -1,6 +1,6 @@
 ﻿<Project DefaultTargets="Build">
   <ItemGroup>
-    <ProjectFile Include="First Project/First.csproj" />
+    <ProjectFile Include="First%27s Project/First.csproj" />
     <ProjectFile Include="Second/Second.csproj" />
   </ItemGroup>
   <Target Name="Restore">

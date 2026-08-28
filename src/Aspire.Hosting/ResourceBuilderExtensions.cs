@@ -1722,7 +1722,7 @@ public static class ResourceBuilderExtensions
 
         var endpointReference = new EndpointReference(resourceWithEndpoints, endpointAnnotation, KnownNetworkIdentifiers.LocalhostNetwork);
 
-        builder.WithAnnotation(new EnvironmentCallbackAnnotation(context =>
+        builder.WithAnnotation(new RuntimeEnvironmentCallbackAnnotation(context =>
         {
             context.EnvironmentVariables[endpointAnnotation.TargetPortEnvironmentVariable!] = endpointReference.Property(EndpointProperty.TargetPort);
         }));

@@ -447,7 +447,8 @@ public static class OrleansServiceExtensions
             provider.ConfigureResource(builder, $"BroadcastChannel__{name}");
         }
 
-        builder.WithEnvironment(context =>
+#pragma warning disable ASPIREENVIRONMENT001 // Reference values are runtime-only.
+        builder.WithRuntimeEnvironment(context =>
         {
             context.EnvironmentVariables["Orleans__ClusterId"] = res.ClusterId;
             context.EnvironmentVariables["Orleans__ServiceId"] = res.ServiceId;
@@ -458,6 +459,7 @@ public static class OrleansServiceExtensions
                 context.EnvironmentVariables["Orleans__EnableDistributedTracing"] = "true";
             }
         });
+#pragma warning restore ASPIREENVIRONMENT001
 
         if (isSilo)
         {

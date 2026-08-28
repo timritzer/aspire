@@ -545,8 +545,8 @@ internal sealed class DistributedApplicationPipeline : IDistributedApplicationPi
     /// <summary>
     /// Creates a clone of this pipeline whose built-in steps are independent
     /// copies (with fresh <see cref="PipelineStep.DependsOnSteps"/> /
-    /// <see cref="PipelineStep.RequiredBySteps"/> lists). Configuration callbacks
-    /// are shallow-copied — the same delegates are reused.
+    /// <see cref="PipelineStep.RequiredBySteps"/> and final action lists).
+    /// Configuration callbacks are shallow-copied — the same delegates are reused.
     /// </summary>
     /// <remarks>
     /// Used by <c>DistributedApplication</c> to run the BeforeStart phase against
@@ -1134,9 +1134,9 @@ internal sealed class DistributedApplicationPipeline : IDistributedApplicationPi
         try
         {
             await step.Action(stepContext).ConfigureAwait(false);
-            if (step.FinalAction is not null)
+            foreach (var finalAction in step.FinalActions)
             {
-                await step.FinalAction(stepContext).ConfigureAwait(false);
+                await finalAction(stepContext).ConfigureAwait(false);
             }
         }
         catch (DistributedApplicationException)

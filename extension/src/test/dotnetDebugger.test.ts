@@ -458,6 +458,97 @@ suite('Dotnet Debugger Extension Tests', () => {
             ['--configuration', 'Release']);
     });
 
+    test('target path property evaluation merges ambient and resource build environments', async () => {
+        const ambientName = 'ASPIRE_TEST_TARGET_PATH_AMBIENT';
+        const overriddenName = 'ASPIRE_TEST_TARGET_PATH_OVERRIDE';
+        const inheritedEnvironment = {
+            [ambientName]: process.env[ambientName],
+            [overriddenName]: process.env[overriddenName]
+        };
+        process.env[ambientName] = 'ambient';
+        process.env[overriddenName] = 'ambient';
+
+        try {
+            sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+            const resolvedEnv = { MARKER: 'resolved-env' } as unknown as NodeJS.ProcessEnv;
+            const createResolvedEnvStub = sinon.stub(cliPathEnvironmentModule, 'createResolvedAspireCliPathProcessEnvironment').returns(resolvedEnv);
+            const execFileStub = sinon.stub(childProcess, 'execFile').yields(null, { stdout: '/workspace/bin/Debug/app.dll', stderr: '' });
+            const service = new DotNetService({} as AspireDebugSession);
+
+            await service.getDotNetTargetPath('/workspace/app.csproj', 'Debug', {
+                [overriddenName]: 'resource',
+                ASPIRE_TEST_TARGET_PATH_RESOURCE: 'resource'
+            });
+
+            const baseEnvironment = createResolvedEnvStub.firstCall.args[1];
+            assert.strictEqual(baseEnvironment?.[ambientName], 'ambient');
+            assert.strictEqual(baseEnvironment?.[overriddenName], 'resource');
+            assert.strictEqual(baseEnvironment?.ASPIRE_TEST_TARGET_PATH_RESOURCE, 'resource');
+            assert.strictEqual(execFileStub.firstCall.args[2]?.env, resolvedEnv);
+        } finally {
+            for (const [name, value] of Object.entries(inheritedEnvironment)) {
+                restoreEnvironmentVariable(name, value);
+            }
+        }
+    });
+
+    test('target path property evaluation removes differently-cased ambient variables on Windows', async () => {
+        const platformStub = sinon.stub(process, 'platform').value('win32');
+        const ambientName = 'Aspire_Test_Target_Path_Case';
+        const resourceName = ambientName.toUpperCase();
+        const normalizedName = ambientName.toLowerCase();
+        const inheritedEntries = Object.entries(process.env)
+            .filter(([name]) => name.toLowerCase() === normalizedName);
+        for (const [name] of inheritedEntries) {
+            delete process.env[name];
+        }
+        process.env[ambientName] = 'ambient';
+
+        try {
+            sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: '/resolved/aspire', available: true, source: 'configured' });
+            const createResolvedEnvStub = sinon.stub(cliPathEnvironmentModule, 'createResolvedAspireCliPathProcessEnvironment').returns({});
+            sinon.stub(childProcess, 'execFile').yields(null, { stdout: '/workspace/bin/Debug/app.dll', stderr: '' });
+            const service = new DotNetService({} as AspireDebugSession);
+
+            await service.getDotNetTargetPath('/workspace/app.csproj', undefined, {
+                [resourceName]: 'resource'
+            });
+
+            const matchingEntries = Object.entries(createResolvedEnvStub.firstCall.args[1] ?? {})
+                .filter(([name]) => name.toLowerCase() === normalizedName);
+            assert.deepStrictEqual(matchingEntries, [[resourceName, 'resource']]);
+        } finally {
+            platformStub.restore();
+            for (const name of Object.keys(process.env)) {
+                if (name.toLowerCase() === normalizedName) {
+                    delete process.env[name];
+                }
+            }
+            for (const [name, value] of inheritedEntries) {
+                process.env[name] = value;
+            }
+        }
+    });
+
+    test('target path property evaluation does not reintroduce a stale differently-cased AspireCliPath on Windows', async () => {
+        const platformStub = sinon.stub(process, 'platform').value('win32');
+        sinon.stub(cliPathModule, 'resolveCliPath').resolves({ cliPath: 'aspire', available: true, source: 'path' });
+        const execFileStub = sinon.stub(childProcess, 'execFile').yields(null, { stdout: '/workspace/bin/Debug/app.dll', stderr: '' });
+        const service = new DotNetService({} as AspireDebugSession);
+
+        try {
+            await service.getDotNetTargetPath('/workspace/app.csproj', undefined, {
+                ASPIRECLIPATH: 'C:\\stale\\aspire.exe'
+            });
+
+            const matchingNames = Object.keys(execFileStub.firstCall.args[2]?.env ?? {})
+                .filter(name => name.toLowerCase() === 'aspireclipath');
+            assert.deepStrictEqual(matchingNames, []);
+        } finally {
+            platformStub.restore();
+        }
+    });
+
     test('project-scoped dotnet commands resolve the CLI using the target derived from the project path and forward only that resolved CLI', async () => {
         const projectPath = nodePath.join(process.cwd(), '.test-temp', `dotnet-cli-target-${process.pid}-${Date.now()}`, 'TestProject.csproj');
         const outputPath = nodePath.join(nodePath.dirname(projectPath), 'bin', 'Debug', 'net10.0', 'TestProject.dll');

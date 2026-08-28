@@ -196,7 +196,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         using var builder = TestDistributedApplicationBuilder.Create(
             options => options.ProjectDirectory = workspace.Path,
             outputHelper);
-        var firstProject = CreateProject(workspace.Path, "First Project", "First.csproj");
+        var firstProject = CreateProject(workspace.Path, "First's Project", "First.csproj");
         var secondProject = CreateProject(workspace.Path, "Second", "Second.csproj");
         builder.AddDotnetProject("first", firstProject, options => options.ExcludeLaunchProfile = true);
         builder.AddDotnetProject("second", secondProject, options => options.ExcludeLaunchProfile = true);
@@ -207,8 +207,8 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         var buildProjectPath = await buildResource.WriteBuildProjectAsync(NullLogger.Instance, TestContext.Current.CancellationToken);
         var contents = await File.ReadAllTextAsync(buildProjectPath, TestContext.Current.CancellationToken);
         contents = contents.Replace(
-            NormalizeBuildProjectPath(Path.GetRelativePath(buildResource.BuildDirectory, firstProject)),
-            "First Project/First.csproj",
+            NormalizeBuildProjectPath(Path.GetRelativePath(buildResource.BuildDirectory, firstProject)).Replace("'", "%27", StringComparison.Ordinal),
+            "First%27s Project/First.csproj",
             StringComparison.Ordinal);
         contents = contents.Replace(
             NormalizeBuildProjectPath(Path.GetRelativePath(buildResource.BuildDirectory, secondProject)),
@@ -380,6 +380,249 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task ProjectWithOrleansReferenceSharesTraversalBuild()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var apiPath = CreateProject(workspace.Path, "Api", "Api.csproj");
+        var workerPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var orleans = builder.AddOrleans("orleans")
+            .WithDevelopmentClustering();
+        builder.AddDotnetProject("api", apiPath, options => options.ExcludeLaunchProfile = true);
+        builder.AddDotnetProject("worker", workerPath, options => options.ExcludeLaunchProfile = true)
+            .WithReference(orleans);
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal(
+            [NormalizeProjectPath(apiPath), NormalizeProjectPath(workerPath)],
+            buildResource.ProjectPaths);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CoordinatedBuildCoexistsWithUserBeforeStartFinalAction(bool registerFinalActionFirst)
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var finalActionExecuted = false;
+
+        void RegisterFinalAction() =>
+            builder.Pipeline.WithFinalAction(
+                WellKnownPipelineSteps.BeforeStart,
+                _ =>
+                {
+                    finalActionExecuted = true;
+                    return Task.CompletedTask;
+                });
+
+        if (registerFinalActionFirst)
+        {
+            RegisterFinalAction();
+        }
+
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true);
+
+        if (!registerFinalActionFirst)
+        {
+            RegisterFinalAction();
+        }
+
+        await using var app = builder.Build();
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(finalActionExecuted);
+        Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+    }
+
+    [Fact]
+    public async Task ContextSpecificBuildEnvironmentCallbackIsEvaluatedOnceAndSharedWithRuntimeCallbacks()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var callbackCount = 0;
+        IResource? callbackResource = null;
+        var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
+            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "runtime")
+            .WithEnvironment(context =>
+            {
+                callbackCount++;
+                // The build value records whether the callback observed a runtime-only variable so a leak from the
+                // project environment into the coordinated build shows up as a value difference.
+                callbackResource = context.Resource;
+                context.EnvironmentVariables["BUILD_FLAVOR"] =
+                    context.EnvironmentVariables.ContainsKey("RUNTIME_ONLY")
+                        ? $"contaminated-{callbackCount}"
+                        : $"custom-{callbackCount}";
+            })
+            .WithRuntimeEnvironment(context =>
+                context.EnvironmentVariables["RUNTIME_BUILD_FLAVOR"] = context.EnvironmentVariables["BUILD_FLAVOR"]);
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        var buildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            buildResource,
+            serviceProvider: app.Services);
+        var projectEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource,
+            serviceProvider: app.Services);
+
+        Assert.Equal(1, callbackCount);
+        Assert.Same(project.Resource, callbackResource);
+        Assert.Equal(["BUILD_FLAVOR"], buildEnvironment.Keys);
+        Assert.Equal("custom-1", buildEnvironment["BUILD_FLAVOR"]);
+        Assert.Equal("custom-1", projectEnvironment["BUILD_FLAVOR"]);
+        Assert.Equal("runtime", projectEnvironment["RUNTIME_ONLY"]);
+        Assert.Equal("custom-1", projectEnvironment["RUNTIME_BUILD_FLAVOR"]);
+    }
+
+    [Fact]
+    public async Task RestartedProjectKeepsTheCoordinatedBuildEnvironment()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var callbackCount = 0;
+        var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
+            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "runtime")
+            .WithEnvironment(context =>
+            {
+                callbackCount++;
+                context.EnvironmentVariables["BUILD_FLAVOR"] =
+                    context.EnvironmentVariables.ContainsKey("RUNTIME_ONLY")
+                        ? $"contaminated-{callbackCount}"
+                        : $"custom-{callbackCount}";
+            });
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(buildResource, serviceProvider: app.Services);
+        await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(project.Resource, serviceProvider: app.Services);
+
+        // DCP forgets the cached callback results of a resource whenever it restarts. The coordinated build
+        // environment stays owned by the coordinator, so neither a project restart nor a rebuild can re-run the user
+        // callback, and the values used by the initial build remain in force.
+        ForgetCachedEnvironmentResults(project.Resource);
+        ForgetCachedEnvironmentResults(buildResource);
+        var restartedProjectEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource,
+            serviceProvider: app.Services);
+        var rebuildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            buildResource,
+            serviceProvider: app.Services);
+
+        Assert.Equal(1, callbackCount);
+        Assert.Equal("custom-1", restartedProjectEnvironment["BUILD_FLAVOR"]);
+        Assert.Equal("runtime", restartedProjectEnvironment["RUNTIME_ONLY"]);
+        Assert.Equal(["BUILD_FLAVOR"], rebuildEnvironment.Keys);
+        Assert.Equal("custom-1", rebuildEnvironment["BUILD_FLAVOR"]);
+    }
+
+    [Fact]
+    public async Task ContextSpecificBuildEnvironmentReplayPreservesCallbackOrderAndRemovals()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("SHARED", "build-first")
+            .WithEnvironment("TEMPORARY", "temporary")
+            .WithRuntimeEnvironment(context => context.EnvironmentVariables["SHARED"] = "runtime")
+            .WithEnvironment(context =>
+            {
+                context.EnvironmentVariables["SECOND"] = "build-second";
+                context.EnvironmentVariables.Remove("TEMPORARY");
+            });
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        var buildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            buildResource,
+            serviceProvider: app.Services);
+        var projectEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource,
+            serviceProvider: app.Services);
+
+        Assert.Equal(["SECOND", "SHARED"], buildEnvironment.Keys.Order(StringComparer.Ordinal));
+        Assert.Equal("build-first", buildEnvironment["SHARED"]);
+        Assert.Equal("build-second", buildEnvironment["SECOND"]);
+
+        // The stand-ins replace the callbacks in place, so the runtime callback still overwrites the value the first
+        // build callback wrote and the removal performed by the last build callback still applies.
+        Assert.Equal(
+            ["SECOND", "SHARED"],
+            projectEnvironment.Keys.Where(key => key is "SHARED" or "SECOND" or "TEMPORARY").Order(StringComparer.Ordinal));
+        Assert.Equal("runtime", projectEnvironment["SHARED"]);
+        Assert.Equal("build-second", projectEnvironment["SECOND"]);
+    }
+
+    [Fact]
+    public async Task FailedContextSpecificBuildEnvironmentEvaluationIsNotCachedAcrossResources()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var callbackCount = 0;
+        var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment(context =>
+            {
+                callbackCount++;
+                if (callbackCount == 1)
+                {
+                    throw new InvalidOperationException("Build environment callback failed.");
+                }
+
+                context.EnvironmentVariables["BUILD_FLAVOR"] = "custom";
+            });
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(buildResource, serviceProvider: app.Services));
+
+        // A failed evaluation belongs to the consumer that triggered it; the rebuilder and the project must still be
+        // able to obtain a build environment instead of inheriting the faulted result.
+        var rebuilder = Assert.Single(builder.Resources.OfType<ProjectRebuilderResource>());
+        var rebuildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            rebuilder,
+            serviceProvider: app.Services);
+        var projectEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource,
+            serviceProvider: app.Services);
+
+        Assert.Equal("Build environment callback failed.", failure.Message);
+        Assert.Equal(2, callbackCount);
+        Assert.Equal(["BUILD_FLAVOR"], rebuildEnvironment.Keys);
+        Assert.Equal("custom", rebuildEnvironment["BUILD_FLAVOR"]);
+        Assert.Equal("custom", projectEnvironment["BUILD_FLAVOR"]);
+    }
+
+    [Fact]
     public async Task ContextSpecificBuildEnvironmentIsSharedWithRebuilderAndIdeLaunch()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
@@ -420,6 +663,62 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         Assert.Equal("custom", rebuildEnvironment["BUILD_FLAVOR"]);
         Assert.NotNull(launchConfiguration.BuildEnvironmentVariableNames);
         Assert.Equal(["BUILD_FLAVOR"], launchConfiguration.BuildEnvironmentVariableNames);
+    }
+
+    [Fact]
+    public async Task CoordinatedBuildEnvironmentPreservesLaunchProfileAndBaselineCallbacks()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var propertiesDirectory = Directory.CreateDirectory(
+            Path.Combine(Path.GetDirectoryName(projectPath)!, "Properties"));
+        File.WriteAllText(Path.Combine(propertiesDirectory.FullName, "launchSettings.json"), """
+            {
+              "profiles": {
+                "worker": {
+                  "commandName": "Project",
+                  "environmentVariables": {
+                    "LAUNCH_ONLY": "from-profile",
+                    "OVERRIDDEN": "from-profile"
+                  }
+                }
+              }
+            }
+            """);
+
+        var project = builder.AddDotnetProject("worker", projectPath);
+
+        // Callbacks that AddDotnetProject registered itself are the baseline; only user callbacks added afterwards
+        // take part in the coordinated build.
+        var baselineCallbacks = project.Resource.Annotations.OfType<EnvironmentCallbackAnnotation>().ToArray();
+        project.WithEnvironment(context => context.EnvironmentVariables["OVERRIDDEN"] = "from-callback");
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        var buildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            buildResource,
+            serviceProvider: app.Services);
+        var projectEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource,
+            serviceProvider: app.Services);
+
+        // Replacing the user callbacks in place must leave the baseline callbacks untouched, including their identity,
+        // so the values they contribute to the project are unchanged.
+        var remainingCallbacks = project.Resource.Annotations.OfType<EnvironmentCallbackAnnotation>().ToArray();
+        Assert.NotEmpty(baselineCallbacks);
+        Assert.All(baselineCallbacks, callback => Assert.Contains(callback, remainingCallbacks));
+
+        Assert.Equal(
+            ["LAUNCH_ONLY", "OVERRIDDEN"],
+            buildEnvironment.Keys.Order(StringComparer.Ordinal));
+        Assert.Equal("from-profile", buildEnvironment["LAUNCH_ONLY"]);
+        Assert.Equal("from-callback", buildEnvironment["OVERRIDDEN"]);
+        Assert.Equal("from-callback", projectEnvironment["OVERRIDDEN"]);
     }
 
     [Fact]
@@ -786,6 +1085,9 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         Assert.Equal(firstException.Message, secondException.Message);
         Assert.Equal(originalProjectPaths, primaryBuildResource.ProjectPaths);
         Assert.Equal(originalWorkingDirectory, primaryBuildResource.WorkingDirectory);
+        var executableAnnotation = Assert.Single(primaryBuildResource.Annotations.OfType<ExecutableAnnotation>());
+        Assert.Equal("dotnet", executableAnnotation.Command);
+        Assert.Equal(originalWorkingDirectory, executableAnnotation.WorkingDirectory);
         Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
     }
 
@@ -1432,6 +1734,18 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
 
     private static string NormalizeProjectPath(string path) =>
         Path.GetFullPath(path);
+
+    /// <summary>
+    /// Emulates what DCP does to a resource when it restarts it.
+    /// </summary>
+    private static void ForgetCachedEnvironmentResults(IResource resource)
+    {
+        Assert.True(resource.TryGetEnvironmentVariables(out var environmentCallbacks));
+        foreach (var environmentCallback in environmentCallbacks)
+        {
+            environmentCallback.AsCallbackAnnotation().ForgetCachedResult();
+        }
+    }
 
     private static async Task<IReadOnlyList<LogLine>> ReadLogsAsync(
         ResourceLoggerService loggerService,

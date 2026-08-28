@@ -347,11 +347,13 @@ public static class AzureFunctionsProjectResourceExtensions
 
         destination.WithReferenceRelationship(source.Resource);
 
-        return destination.WithEnvironment(context =>
+#pragma warning disable ASPIREENVIRONMENT001 // Reference values are runtime-only.
+        return destination.WithRuntimeEnvironment(context =>
         {
             connectionName ??= source.Resource.Name;
             source.Resource.ApplyAzureFunctionsConfiguration(context.EnvironmentVariables, connectionName);
         });
+#pragma warning restore ASPIREENVIRONMENT001
     }
 
     internal static IResourceBuilder<AzureFunctionsProjectResource>? TryWithReference(
@@ -378,11 +380,13 @@ public static class AzureFunctionsProjectResourceExtensions
 
         destination.WithReferenceRelationship(source.Resource);
 
-        return destination.WithEnvironment(context =>
+#pragma warning disable ASPIREENVIRONMENT001 // Reference values are runtime-only.
+        return destination.WithRuntimeEnvironment(context =>
         {
             connectionName ??= source.Resource.Name;
             azureFunctionsConfig.ApplyAzureFunctionsConfiguration(context.EnvironmentVariables, connectionName);
         });
+#pragma warning restore ASPIREENVIRONMENT001
     }
 
     private static string CreateDefaultStorageName(this IDistributedApplicationBuilder builder)

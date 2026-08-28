@@ -279,6 +279,89 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task WriteAllTextAtomicallyAsync_ReclaimsStaleTemporaryFile()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var path = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        var orphanPath = path + ".tmp-" + new string('0', 32);
+        await File.WriteAllTextAsync(orphanPath, "orphan\n");
+        File.SetLastWriteTimeUtc(orphanPath, DateTime.UnixEpoch);
+
+        await InitCommand.WriteAllTextAtomicallyAsync(
+            path,
+            "replacement\n",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("replacement\n", await File.ReadAllTextAsync(path));
+        Assert.False(File.Exists(orphanPath));
+    }
+
+    [Fact]
+    public async Task WriteAllTextAtomicallyAsync_PreservesActiveStaleTemporaryFile()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var path = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        var activePath = path + ".tmp-" + new string('1', 32);
+        await File.WriteAllTextAsync(activePath, "active\n");
+        File.SetLastWriteTimeUtc(activePath, DateTime.UnixEpoch);
+        using var activeWriter = new FileStream(activePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        await InitCommand.WriteAllTextAtomicallyAsync(
+            path,
+            "replacement\n",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("replacement\n", await File.ReadAllTextAsync(path));
+        Assert.True(File.Exists(activePath));
+    }
+
+    [Fact]
+    public async Task WriteAllTextAtomicallyAsync_PreservesRecentTemporaryFile()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var path = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        var recentPath = path + ".tmp-" + new string('2', 32);
+        await File.WriteAllTextAsync(recentPath, "recent\n");
+        File.SetLastWriteTimeUtc(recentPath, DateTime.UtcNow.AddHours(1));
+
+        await InitCommand.WriteAllTextAtomicallyAsync(
+            path,
+            "replacement\n",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("replacement\n", await File.ReadAllTextAsync(path));
+        Assert.True(File.Exists(recentPath));
+    }
+
+    [Fact]
+    public async Task WriteAllTextAtomicallyAsync_PreservesUnrelatedSiblingFiles()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var path = Path.Combine(workspace.WorkspaceRoot.FullName, ".gitignore");
+        string[] unrelatedPaths =
+        [
+            path + ".tmp-" + new string('0', 31),
+            path + ".tmp-" + new string('A', 32),
+            path + ".tmp-" + new string('0', 32) + "-extra",
+            Path.Combine(workspace.WorkspaceRoot.FullName, "other.tmp-" + new string('0', 32))
+        ];
+
+        foreach (var unrelatedPath in unrelatedPaths)
+        {
+            await File.WriteAllTextAsync(unrelatedPath, "unrelated\n");
+            File.SetLastWriteTimeUtc(unrelatedPath, DateTime.UnixEpoch);
+        }
+
+        await InitCommand.WriteAllTextAtomicallyAsync(
+            path,
+            "replacement\n",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("replacement\n", await File.ReadAllTextAsync(path));
+        Assert.All(unrelatedPaths, unrelatedPath => Assert.True(File.Exists(unrelatedPath)));
+    }
+
+    [Fact]
     public async Task InitCommand_SingleFileSkeleton_UpdatesGitIgnoreSymlinkTarget()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);

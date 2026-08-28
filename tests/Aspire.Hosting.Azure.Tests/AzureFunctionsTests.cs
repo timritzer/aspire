@@ -1,7 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#pragma warning disable ASPIRECOMMAND001
+#pragma warning disable ASPIRECOMMAND001, ASPIREENVIRONMENT001
 
 using System.Reflection;
 using System.Text.Json.Nodes;
@@ -302,6 +302,7 @@ public class AzureFunctionsTests(ITestOutputHelper outputHelper)
         Assert.Contains("input__queueServiceUri", context.EnvironmentVariables.Keys);
         Assert.Contains("Aspire__Azure__Storage__Blobs__input__ServiceUri", context.EnvironmentVariables.Keys);
         Assert.DoesNotContain("ConnectionStrings__input", context.EnvironmentVariables.Keys);
+        Assert.IsType<RuntimeEnvironmentCallbackAnnotation>(envAnnotations.Last());
     }
 
     [Fact]

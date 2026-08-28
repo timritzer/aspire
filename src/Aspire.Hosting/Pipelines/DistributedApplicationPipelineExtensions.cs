@@ -16,18 +16,18 @@ public static class DistributedApplicationPipelineExtensions
     /// </summary>
     /// <param name="pipeline">The distributed application pipeline.</param>
     /// <param name="stepName">The name of the pipeline step.</param>
-    /// <param name="action">The final action to execute.</param>
+    /// <param name="action">A final action to execute.</param>
     /// <returns>The distributed application pipeline for chaining.</returns>
     /// <exception cref="ArgumentNullException">
     /// Thrown when <paramref name="pipeline"/> or <paramref name="action"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">Thrown when <paramref name="stepName"/> is null or empty.</exception>
-    /// <exception cref="InvalidOperationException">
-    /// Thrown when the named step does not exist or already has a final action.
-    /// </exception>
+    /// <exception cref="InvalidOperationException">Thrown when the named step does not exist.</exception>
     /// <remarks>
     /// The final action is configured when the pipeline graph is resolved, so it runs after dependencies
-    /// added by resource annotations and other pipeline configuration callbacks.
+    /// added by resource annotations and other pipeline configuration callbacks. Multiple final actions
+    /// for the same step execute sequentially in registration order. If a final action fails, subsequent
+    /// final actions are not invoked.
     /// </remarks>
     [AspireExportIgnore(Reason = "Delegate callbacks are not ATS-compatible.")]
     public static IDistributedApplicationPipeline WithFinalAction(
@@ -41,8 +41,15 @@ public static class DistributedApplicationPipelineExtensions
 
         pipeline.AddPipelineConfiguration(context =>
         {
-            var step = context.Steps.Single(candidate => candidate.Name == stepName);
-            step.SetFinalAction(action);
+            var step = context.Steps.SingleOrDefault(candidate => candidate.Name == stepName);
+            if (step is null)
+            {
+                var availableSteps = string.Join(", ", context.Steps.Select(candidate => $"'{candidate.Name}'"));
+                throw new InvalidOperationException(
+                    $"Step '{stepName}' not found in pipeline. Available steps: {availableSteps}");
+            }
+
+            step.AddFinalAction(action);
             return Task.CompletedTask;
         });
 

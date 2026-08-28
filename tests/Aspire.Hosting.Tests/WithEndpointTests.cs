@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#pragma warning disable ASPIREENVIRONMENT001
+
 using System.Net.Sockets;
 using System.Reflection;
 using Aspire.Hosting.Tests.Utils;
@@ -1002,7 +1004,7 @@ public class WithEndpointTests
         var resource = Assert.Single(builder.Resources.OfType<ContainerResource>());
         var envAnnotations = resource.Annotations.OfType<EnvironmentCallbackAnnotation>().ToList();
         // Should have exactly one env callback for PORT, not two
-        Assert.Single(envAnnotations);
+        Assert.IsType<RuntimeEnvironmentCallbackAnnotation>(Assert.Single(envAnnotations));
     }
 
     [Fact]

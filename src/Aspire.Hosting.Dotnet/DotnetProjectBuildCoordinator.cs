@@ -370,12 +370,16 @@ internal static class DotnetProjectBuildCoordinator
                     {
                         var entry = step.Projects.Single();
                         buildResource.ConfigureDirectBuild(entry.Metadata.ProjectPath, step.WorkingDirectory);
-                        var environmentAnnotation = CopyProjectEnvironment(entry, buildResource);
-                        rollbackActions.Push(() => buildResource.Annotations.Remove(environmentAnnotation));
+
+                        // One coordinator-owned evaluation feeds the coordinated build, the rebuilder, the IDE launch
+                        // configuration, and the project itself, so the user callbacks run once and every consumer
+                        // observes identical build variables.
+                        var sharedBuildEnvironment = new SharedBuildEnvironment(entry);
+                        rollbackActions.Push(ReplaceProjectBuildCallbacks(sharedBuildEnvironment));
+                        rollbackActions.Push(ApplyBuildEnvironment(buildResource, sharedBuildEnvironment));
                         if (FindRebuilder(model, entry.Registration.Resource) is { } rebuilder)
                         {
-                            var rebuildEnvironmentAnnotation = CopyProjectEnvironment(entry, rebuilder);
-                            rollbackActions.Push(() => rebuilder.Annotations.Remove(rebuildEnvironmentAnnotation));
+                            rollbackActions.Push(ApplyBuildEnvironment(rebuilder, sharedBuildEnvironment));
                         }
                     }
 
@@ -508,37 +512,62 @@ internal static class DotnetProjectBuildCoordinator
             return buildResource;
         }
 
-        private static EnvironmentCallbackAnnotation CopyProjectEnvironment(
-            ProjectEntry entry,
-            IResource buildResource)
+        /// <summary>
+        /// Copies the coordinated build environment onto a resource that performs the build (the coordinated build
+        /// resource or the project rebuilder).
+        /// </summary>
+        private static Action ApplyBuildEnvironment(IResource target, SharedBuildEnvironment sharedBuildEnvironment)
         {
-            // Build-plan materialization is the final action of BeforeStart, so this snapshot includes every
-            // callback that can affect the coordinated initial build without admitting later runtime mutations.
-            var buildEnvironmentCallbacks = GetContextSpecificBuildCallbacks(entry.Registration).ToArray();
-            var annotation = new EnvironmentCallbackAnnotation(async context =>
+            var annotation = new EnvironmentCallbackAnnotation(sharedBuildEnvironment.ApplyBuildEnvironmentAsync);
+            target.Annotations.Add(annotation);
+            return () => target.Annotations.Remove(annotation);
+        }
+
+        /// <summary>
+        /// Replaces each build-relevant callback on the project with an in-place stand-in that replays what the
+        /// coordinated evaluation recorded for that callback.
+        /// </summary>
+        /// <remarks>
+        /// The stand-ins keep the positions of the callbacks they replace so callbacks registered around them - most
+        /// importantly runtime-only callbacks - still observe the same values in the same order as before.
+        /// </remarks>
+        private static Action ReplaceProjectBuildCallbacks(SharedBuildEnvironment sharedBuildEnvironment)
+        {
+            var annotations = sharedBuildEnvironment.Resource.Annotations;
+
+            // Resolve every position before mutating anything so a callback that disappeared cannot leave the project
+            // with a partially replaced set of annotations.
+            var positions = sharedBuildEnvironment.Callbacks
+                .Select((original, ordinal) => (Original: original, Ordinal: ordinal, Index: annotations.IndexOf(original)))
+                .ToArray();
+            if (Array.FindIndex(positions, position => position.Index < 0) >= 0)
             {
-                foreach (var (name, value) in entry.Registration.LaunchProfileEnvironment)
-                {
-                    context.EnvironmentVariables.TryAdd(name, Environment.ExpandEnvironmentVariables(value));
-                }
+                throw new DistributedApplicationException(
+                    $"An environment callback of resource '{sharedBuildEnvironment.Resource.Name}' was removed while the " +
+                    "coordinated .NET project build plan was being materialized.");
+            }
 
-                var projectContext = new EnvironmentCallbackContext(
-                    context.ExecutionContext,
-                    entry.Registration.Resource,
-                    context.EnvironmentVariables,
-                    context.CancellationToken)
-                {
-                    Logger = context.Logger,
-                };
-                foreach (var callback in buildEnvironmentCallbacks)
-                {
-                    await callback.Callback(projectContext).ConfigureAwait(false);
-                }
+            var replacements = new List<(EnvironmentCallbackAnnotation Original, EnvironmentCallbackAnnotation Replay)>(
+                positions.Length);
+            foreach (var (original, ordinal, index) in positions)
+            {
+                var replay = new EnvironmentCallbackAnnotation(
+                    context => sharedBuildEnvironment.ApplyContributionAsync(ordinal, context));
+                annotations[index] = replay;
+                replacements.Add((original, replay));
+            }
 
-                entry.Metadata.SetBuildEnvironmentVariableNames(context.EnvironmentVariables.Keys);
-            });
-            buildResource.Annotations.Add(annotation);
-            return annotation;
+            return () =>
+            {
+                foreach (var (original, replay) in replacements)
+                {
+                    var index = annotations.IndexOf(replay);
+                    if (index >= 0)
+                    {
+                        annotations[index] = original;
+                    }
+                }
+            };
         }
 
         private static IResource? FindRebuilder(
@@ -584,6 +613,178 @@ internal static class DotnetProjectBuildCoordinator
                 : [];
 
         private readonly record struct BuildContext(string? GlobalJsonPath, string? Configuration);
+
+        /// <summary>
+        /// Owns the single evaluation of a project's build-relevant environment callbacks.
+        /// </summary>
+        /// <remarks>
+        /// The coordinated build resource, the project rebuilder, the IDE launch configuration, and the project itself
+        /// must all see the same build variables. Letting each of them evaluate the user callbacks would run those
+        /// callbacks several times and would let whichever resource evaluated first decide the build inputs. That is
+        /// unsafe because the project's own environment also carries runtime-only variables (service discovery,
+        /// connection strings, endpoint-derived values), which must never reach the build. Recording the result here
+        /// rather than in the <see cref="EnvironmentCallbackAnnotation"/> cache also keeps ownership stable: DCP clears
+        /// that cache whenever a resource restarts, so a restarted project would otherwise be able to re-run the user
+        /// callbacks against its runtime-rich context and silently change the build inputs.
+        /// </remarks>
+        private sealed class SharedBuildEnvironment
+        {
+            private readonly ProjectEntry _entry;
+            private readonly object _lock = new();
+            private Task<BuildEnvironmentEvaluation>? _evaluation;
+
+            public SharedBuildEnvironment(ProjectEntry entry)
+            {
+                _entry = entry;
+                Callbacks = GetContextSpecificBuildCallbacks(entry.Registration).ToArray();
+            }
+
+            public DotnetProjectResource Resource => _entry.Registration.Resource;
+
+            /// <summary>
+            /// Gets the project callbacks that contribute to the coordinated build, in registration order.
+            /// </summary>
+            /// <remarks>
+            /// Build-plan materialization is the final action of BeforeStart, so this snapshot includes every callback
+            /// that can affect the coordinated initial build without admitting later runtime mutations.
+            /// </remarks>
+            public IReadOnlyList<EnvironmentCallbackAnnotation> Callbacks { get; }
+
+            /// <summary>
+            /// Applies the complete coordinated build environment - launch profile values and every callback
+            /// contribution - to the resource that runs the build.
+            /// </summary>
+            public async Task ApplyBuildEnvironmentAsync(EnvironmentCallbackContext context)
+            {
+                var evaluation = await EvaluateOnceAsync(context).ConfigureAwait(false);
+                foreach (var (name, value) in evaluation.LaunchProfileEnvironment)
+                {
+                    // Launch profile values never overwrite what the build resource already carries, which matches how
+                    // the project applies its own launch profile.
+                    context.EnvironmentVariables.TryAdd(name, value);
+                }
+
+                foreach (var contribution in evaluation.Contributions)
+                {
+                    contribution.ApplyTo(context.EnvironmentVariables);
+                }
+            }
+
+            /// <summary>
+            /// Applies what the callback at <paramref name="ordinal"/> contributed to the coordinated build.
+            /// </summary>
+            public async Task ApplyContributionAsync(int ordinal, EnvironmentCallbackContext context)
+            {
+                var evaluation = await EvaluateOnceAsync(context).ConfigureAwait(false);
+                evaluation.Contributions[ordinal].ApplyTo(context.EnvironmentVariables);
+            }
+
+            private Task<BuildEnvironmentEvaluation> EvaluateOnceAsync(EnvironmentCallbackContext context)
+            {
+                Task<BuildEnvironmentEvaluation> evaluation;
+                lock (_lock)
+                {
+                    // A faulted or canceled evaluation is deliberately not retained. The failure usually belongs to the
+                    // consumer that happened to trigger it - a canceled resource start, for example - and the other
+                    // consumers must still be able to obtain a build environment. Every attempt starts from a fresh
+                    // dictionary, so a retry can never observe a half-applied environment.
+                    if (_evaluation is null || _evaluation.IsFaulted || _evaluation.IsCanceled)
+                    {
+                        _evaluation = EvaluateAsync(context);
+                    }
+
+                    evaluation = _evaluation;
+                }
+
+                // Observe the shared evaluation through the caller's own token so no consumer is held hostage by the
+                // cancellation lifetime of whichever consumer started it.
+                return evaluation.WaitAsync(context.CancellationToken);
+            }
+
+            private async Task<BuildEnvironmentEvaluation> EvaluateAsync(EnvironmentCallbackContext context)
+            {
+                var launchProfileEnvironment = new Dictionary<string, object>();
+                var environment = new Dictionary<string, object>();
+                foreach (var (name, value) in _entry.Registration.LaunchProfileEnvironment)
+                {
+                    var expandedValue = Environment.ExpandEnvironmentVariables(value);
+                    launchProfileEnvironment[name] = expandedValue;
+                    environment[name] = expandedValue;
+                }
+
+                var contributions = new BuildEnvironmentContribution[Callbacks.Count];
+                for (var ordinal = 0; ordinal < Callbacks.Count; ordinal++)
+                {
+                    // The callback observes the project it was registered on, never the build resource, and an
+                    // environment that holds build values only. The logger belongs to whichever consumer triggered the
+                    // shared evaluation; in practice that is the coordinated build, because the project cannot start
+                    // until the build it waits on has produced its environment.
+                    var callbackContext = new EnvironmentCallbackContext(
+                        context.ExecutionContext,
+                        Resource,
+                        environment,
+                        context.CancellationToken)
+                    {
+                        Logger = context.Logger,
+                    };
+                    var before = new Dictionary<string, object>(environment);
+                    await Callbacks[ordinal].Callback(callbackContext).ConfigureAwait(false);
+                    contributions[ordinal] = BuildEnvironmentContribution.Create(before, environment);
+                }
+
+                // Publishing the names here rather than from the build resource keeps the IDE launch configuration
+                // consistent with the values the coordinated build used, whichever consumer evaluated first.
+                _entry.Metadata.SetBuildEnvironmentVariableNames(environment.Keys);
+                return new BuildEnvironmentEvaluation(launchProfileEnvironment, contributions);
+            }
+        }
+
+        private sealed record BuildEnvironmentEvaluation(
+            Dictionary<string, object> LaunchProfileEnvironment,
+            BuildEnvironmentContribution[] Contributions);
+
+        /// <summary>
+        /// The environment changes a single build callback made, recorded so the project can replay them without
+        /// running the callback again.
+        /// </summary>
+        /// <remarks>
+        /// Only the changes are recorded, never the whole environment: replaying a full snapshot onto the project would
+        /// also overwrite variables that runtime-only callbacks own, such as an endpoint-derived ASPNETCORE_URLS that
+        /// deliberately supersedes the launch profile value. A callback that writes a value the build environment
+        /// already held contributes nothing, which is intentional - that value is either seeded from the launch profile
+        /// (and applied to the project by its own launch profile handling) or already replayed by the earlier callback
+        /// that produced it.
+        /// </remarks>
+        private sealed record BuildEnvironmentContribution(
+            KeyValuePair<string, object>[] AssignedVariables,
+            string[] RemovedVariables)
+        {
+            public static BuildEnvironmentContribution Create(
+                Dictionary<string, object> before,
+                Dictionary<string, object> after) =>
+                new(
+                    after
+                        .Where(pair =>
+                            !before.TryGetValue(pair.Key, out var previousValue) ||
+                            !Equals(previousValue, pair.Value))
+                        .ToArray(),
+                    before.Keys
+                        .Where(name => !after.ContainsKey(name))
+                        .ToArray());
+
+            public void ApplyTo(Dictionary<string, object> environmentVariables)
+            {
+                foreach (var name in RemovedVariables)
+                {
+                    environmentVariables.Remove(name);
+                }
+
+                foreach (var (name, value) in AssignedVariables)
+                {
+                    environmentVariables[name] = value;
+                }
+            }
+        }
 
         private sealed record ProjectEntry(
             ResourceRegistration Registration,

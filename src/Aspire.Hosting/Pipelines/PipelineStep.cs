@@ -17,7 +17,7 @@ namespace Aspire.Hosting.Pipelines;
 [AspireExport(ExposeProperties = true)]
 public class PipelineStep
 {
-    private Func<PipelineStepContext, Task>? _finalAction;
+    private readonly List<Func<PipelineStepContext, Task>> _finalActions = [];
 
     /// <summary>
     /// Gets or initializes the unique name of the step.
@@ -38,7 +38,7 @@ public class PipelineStep
     /// </summary>
     public required Func<PipelineStepContext, Task> Action { get; init; }
 
-    internal Func<PipelineStepContext, Task>? FinalAction => _finalAction;
+    internal IReadOnlyList<Func<PipelineStepContext, Task>> FinalActions => _finalActions;
 
     /// <summary>
     /// Gets or initializes the list of step names that this step depends on.
@@ -115,9 +115,9 @@ public class PipelineStep
 
     /// <summary>
     /// Creates a shallow clone of this step with fresh copies of its
-    /// <see cref="DependsOnSteps"/>, <see cref="RequiredBySteps"/>, and
-    /// <see cref="Tags"/> lists. Used by <see cref="DistributedApplicationPipeline"/>
-    /// when isolating step-graph mutations during a phase such as BeforeStart.
+    /// <see cref="DependsOnSteps"/>, <see cref="RequiredBySteps"/>, <see cref="Tags"/>,
+    /// and final action lists. Used by <see cref="DistributedApplicationPipeline"/> when
+    /// isolating step-graph mutations during a phase such as BeforeStart.
     /// </summary>
     internal PipelineStep Clone()
     {
@@ -131,19 +131,14 @@ public class PipelineStep
             Tags = [.. Tags],
             Resource = Resource,
         };
-        clone._finalAction = _finalAction;
+        clone._finalActions.AddRange(_finalActions);
         return clone;
     }
 
-    internal void SetFinalAction(Func<PipelineStepContext, Task> action)
+    internal void AddFinalAction(Func<PipelineStepContext, Task> action)
     {
         ArgumentNullException.ThrowIfNull(action);
-        if (_finalAction is not null)
-        {
-            throw new InvalidOperationException($"A final action is already configured for pipeline step '{Name}'.");
-        }
-
-        _finalAction = action;
+        _finalActions.Add(action);
     }
 
     private string DebuggerToString()

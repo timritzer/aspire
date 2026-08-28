@@ -147,10 +147,11 @@ export class DotNetService implements IDotNetService {
 
         try {
             const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectFile)));
-            const processEnvironment = createResolvedAspireCliPathProcessEnvironment(cliPath);
-            if (environment) {
-                Object.assign(processEnvironment, environment);
+            const propertyEnvironment = { ...process.env };
+            for (const [name, value] of Object.entries(environment ?? {})) {
+                setEnvironmentVariable(propertyEnvironment, name, value);
             }
+            const processEnvironment = createResolvedAspireCliPathProcessEnvironment(cliPath, propertyEnvironment);
             const { stdout } = await this.execFileAsync('dotnet', args, {
                 cwd: path.dirname(projectFile),
                 encoding: 'utf8',

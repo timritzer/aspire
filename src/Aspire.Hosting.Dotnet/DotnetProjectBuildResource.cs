@@ -242,6 +242,7 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource, IDisposab
                 '(' => "%28",
                 ')' => "%29",
                 '*' => "%2A",
+                '\'' => "%27",
                 ';' => "%3B",
                 '?' => "%3F",
                 _ => character,
@@ -253,11 +254,8 @@ internal sealed class DotnetProjectBuildResource : ExecutableResource, IDisposab
 
     private void SetWorkingDirectory(string workingDirectory)
     {
-        Annotations.Add(new ExecutableAnnotation
-        {
-            Command = "dotnet",
-            WorkingDirectory = workingDirectory,
-        });
+        var executableAnnotation = Annotations.OfType<ExecutableAnnotation>().Single();
+        executableAnnotation.WorkingDirectory = workingDirectory;
     }
 
     private void ThrowIfGenerationStarted()
