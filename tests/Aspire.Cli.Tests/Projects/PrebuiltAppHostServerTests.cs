@@ -2167,17 +2167,34 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
-    public async Task PrepareAsync_WithProjectReferencesAndExplicitChannelButNoOverride_PreservesAmbientNuGetConfig()
+    public async Task PrepareAsync_WithProjectReferencesAndExplicitChannelButNoOverride_ComposesAmbientNuGetConfig()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
         const string channelSource = "https://pkgs.dev.azure.com/fake/v3/index.json";
+        const string privateSource = "https://packages.example.com/v3/index.json";
+        var noRestoreValues = new List<bool>();
         XDocument? generatedProject = null;
+        XDocument? generatedRestoreConfig = null;
 
         var aspireConfigPath = Path.Combine(workspace.WorkspaceRoot.FullName, AspireConfigFile.FileName);
         await File.WriteAllTextAsync(aspireConfigPath, """
             {
                 "channel": "daily"
             }
+            """);
+        var ambientConfigPath = Path.Combine(workspace.WorkspaceRoot.FullName, "NuGet.Config");
+        await File.WriteAllTextAsync(ambientConfigPath, $$"""
+            <configuration>
+              <packageSources>
+                <add key="private" value="{{privateSource}}" />
+              </packageSources>
+              <packageSourceCredentials>
+                <private>
+                  <add key="Username" value="user" />
+                  <add key="ClearTextPassword" value="secret" />
+                </private>
+              </packageSourceCredentials>
+            </configuration>
             """);
 
         var closureFiles = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -2186,12 +2203,17 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
         };
         var dotNetCliRunner = new TestDotNetCliRunner
         {
-            BuildAsyncCallback = (projectFilePath, _, _, _) =>
+            BuildAsyncCallback = (projectFilePath, noRestore, _, _) =>
             {
+                noRestoreValues.Add(noRestore);
                 generatedProject = XDocument.Load(projectFilePath.FullName);
+                var ns = generatedProject.Root!.GetDefaultNamespace();
+                var restoreConfigFile = generatedProject.Descendants(ns + "RestoreConfigFile").Single().Value;
+                generatedRestoreConfig = XDocument.Load(restoreConfigFile);
                 WriteClosureInputs(projectFilePath.Directory!, closureFiles, ["MyIntegration"]);
                 return 0;
-            }
+            },
+            GetNuGetConfigPathsAsyncCallback = (_, _, _) => (0, [ambientConfigPath])
         };
 
         var dailyChannel = PackageChannel.CreateExplicitChannel(
@@ -2213,22 +2235,43 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
 
         try
         {
-            var result = await server.PrepareAsync(
+            var firstResult = await server.PrepareAsync(
+                "13.4.0-pr.17141.gf142085f",
+                [
+                    IntegrationReference.FromPackage("Aspire.Hosting.Redis", "13.4.0-pr.17141.gf142085f"),
+                    IntegrationReference.FromProject("MyIntegration", "/path/to/MyIntegration.csproj")
+                ]);
+            var secondResult = await server.PrepareAsync(
                 "13.4.0-pr.17141.gf142085f",
                 [
                     IntegrationReference.FromPackage("Aspire.Hosting.Redis", "13.4.0-pr.17141.gf142085f"),
                     IntegrationReference.FromProject("MyIntegration", "/path/to/MyIntegration.csproj")
                 ]);
 
-            Assert.True(result.Success);
+            Assert.True(firstResult.Success);
+            Assert.True(secondResult.Success);
+            Assert.Equal([false, false], noRestoreValues);
             Assert.NotNull(generatedProject);
 
             var ns = generatedProject!.Root!.GetDefaultNamespace();
             var restoreConfigFile = generatedProject.Descendants(ns + "RestoreConfigFile").FirstOrDefault()?.Value;
             var restoreSources = generatedProject.Descendants(ns + "RestoreAdditionalProjectSources").FirstOrDefault()?.Value;
-            Assert.Null(restoreConfigFile);
-            Assert.Equal(channelSource, restoreSources);
+            Assert.False(string.IsNullOrEmpty(restoreConfigFile));
+            Assert.Null(restoreSources);
             Assert.False(File.Exists(Path.Combine(workingDirectory, "integration-restore", "nuget.config")));
+            Assert.False(File.Exists(restoreConfigFile));
+
+            Assert.NotNull(generatedRestoreConfig);
+            var packageSources = generatedRestoreConfig.Descendants("packageSources").Elements("add").ToArray();
+            Assert.Contains(packageSources, element => element.Attribute("value")?.Value == privateSource);
+            Assert.Contains(packageSources, element => element.Attribute("value")?.Value == channelSource);
+            Assert.NotNull(generatedRestoreConfig.Descendants("packageSourceCredentials").ElementAtOrDefault(0));
+            Assert.Contains(
+                generatedRestoreConfig.Descendants("packageSourceMapping").Elements("packageSource"),
+                element => element.Elements("package").Any(package => package.Attribute("pattern")?.Value == "Aspire*") &&
+                    packageSources.Any(source =>
+                        source.Attribute("key")?.Value == element.Attribute("key")?.Value &&
+                        source.Attribute("value")?.Value == channelSource));
 
             // Aspire package versions remain in their original (non-pinned) form when no override
             // is in play; the exact-version pinning only fires when a single source is selected.
@@ -2236,6 +2279,148 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             Assert.Contains(packageElements, e =>
                 e.Attribute("Include")?.Value == "Aspire.Hosting.Redis" &&
                 e.Attribute("Version")?.Value == "13.4.0-pr.17141.gf142085f");
+        }
+        finally
+        {
+            DeleteWorkingDirectory(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task PrepareAsync_WhenComposedNuGetConfigChanges_InvalidatesRestoreStamp()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        const string channelSource = "https://pkgs.dev.azure.com/fake/v3/index.json";
+        var ambientConfigPath = Path.Combine(workspace.WorkspaceRoot.FullName, "NuGet.Config");
+        await File.WriteAllTextAsync(ambientConfigPath, """
+            <configuration>
+              <packageSources>
+                <add key="private" value="https://packages.example.com/v1/index.json" />
+              </packageSources>
+            </configuration>
+            """);
+
+        var noRestoreValues = new List<bool>();
+        var closureFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["MyIntegration.dll"] = "integration-v1"
+        };
+        var dotNetCliRunner = new TestDotNetCliRunner
+        {
+            BuildAsyncCallback = (projectFilePath, noRestore, _, _) =>
+            {
+                noRestoreValues.Add(noRestore);
+                WriteClosureInputs(projectFilePath.Directory!, closureFiles, ["MyIntegration"]);
+                return 0;
+            },
+            GetNuGetConfigPathsAsyncCallback = (_, _, _) => (0, [ambientConfigPath])
+        };
+        var dailyChannel = PackageChannel.CreateExplicitChannel(
+            name: "daily",
+            quality: PackageChannelQuality.Both,
+            mappings: [new PackageMapping("Aspire*", channelSource)],
+            nuGetPackageCache: new FakeNuGetPackageCache(),
+            features: new TestFeatures(),
+            NullLogger.Instance);
+        var packagingService = new TestPackagingService
+        {
+            GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([dailyChannel])
+        };
+        var server = CreatePrebuiltAppHostServer(
+            workspace,
+            dotNetCliRunner: dotNetCliRunner,
+            packagingService: packagingService);
+        var workingDirectory = GetWorkingDirectory(server);
+        var integrations = new[]
+        {
+            IntegrationReference.FromPackage("Aspire.Hosting.Redis", "13.4.0"),
+            IntegrationReference.FromProject("MyIntegration", "/path/to/MyIntegration.csproj")
+        };
+
+        try
+        {
+            var firstResult = await server.PrepareAsync("13.4.0", integrations, requestedChannel: "daily");
+            var secondResult = await server.PrepareAsync("13.4.0", integrations, requestedChannel: "daily");
+            await File.WriteAllTextAsync(ambientConfigPath, """
+                <configuration>
+                  <packageSources>
+                    <add key="private" value="https://packages.example.com/v2/index.json" />
+                  </packageSources>
+                </configuration>
+                """);
+            var thirdResult = await server.PrepareAsync("13.4.0", integrations, requestedChannel: "daily");
+
+            Assert.True(firstResult.Success);
+            Assert.True(secondResult.Success);
+            Assert.True(thirdResult.Success);
+            Assert.Equal([false, true, false], noRestoreValues);
+        }
+        finally
+        {
+            DeleteWorkingDirectory(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task PrepareAsync_AmbientOnlyRestoreInvalidatesPreviousComposedRestoreStamp()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var ambientConfigPath = Path.Combine(workspace.WorkspaceRoot.FullName, "NuGet.Config");
+        await File.WriteAllTextAsync(ambientConfigPath, """
+            <configuration>
+              <packageSources>
+                <add key="private" value="https://packages.example.com/v3/index.json" />
+              </packageSources>
+            </configuration>
+            """);
+
+        var noRestoreValues = new List<bool>();
+        var closureFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["MyIntegration.dll"] = "integration-v1"
+        };
+        var dotNetCliRunner = new TestDotNetCliRunner
+        {
+            BuildAsyncCallback = (projectFilePath, noRestore, _, _) =>
+            {
+                noRestoreValues.Add(noRestore);
+                WriteClosureInputs(projectFilePath.Directory!, closureFiles, ["MyIntegration"]);
+                return 0;
+            },
+            GetNuGetConfigPathsAsyncCallback = (_, _, _) => (0, [ambientConfigPath])
+        };
+        var dailyChannel = PackageChannel.CreateExplicitChannel(
+            name: "daily",
+            quality: PackageChannelQuality.Both,
+            mappings: [new PackageMapping("Aspire*", "https://pkgs.dev.azure.com/fake/v3/index.json")],
+            nuGetPackageCache: new FakeNuGetPackageCache(),
+            features: new TestFeatures(),
+            NullLogger.Instance);
+        var packagingService = new TestPackagingService
+        {
+            GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([dailyChannel])
+        };
+        var server = CreatePrebuiltAppHostServer(
+            workspace,
+            dotNetCliRunner: dotNetCliRunner,
+            packagingService: packagingService);
+        var workingDirectory = GetWorkingDirectory(server);
+        var integrations = new[]
+        {
+            IntegrationReference.FromPackage("Aspire.Hosting.Redis", "13.4.0"),
+            IntegrationReference.FromProject("MyIntegration", "/path/to/MyIntegration.csproj")
+        };
+
+        try
+        {
+            var firstResult = await server.PrepareAsync("13.4.0", integrations, requestedChannel: "daily");
+            var ambientResult = await server.PrepareAsync("13.4.0", integrations);
+            var finalResult = await server.PrepareAsync("13.4.0", integrations, requestedChannel: "daily");
+
+            Assert.True(firstResult.Success);
+            Assert.True(ambientResult.Success);
+            Assert.True(finalResult.Success);
+            Assert.Equal([false, false, false], noRestoreValues);
         }
         finally
         {

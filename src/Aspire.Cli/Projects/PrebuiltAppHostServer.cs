@@ -746,18 +746,18 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
         Directory.CreateDirectory(restoreDir);
 
         var restoreSources = await ResolveIntegrationRestoreSourcesAsync(requestedChannel, packageSourceOverride, cancellationToken).ConfigureAwait(false);
-        var useMappedRestoreConfig = !string.IsNullOrWhiteSpace(packageSourceOverride) &&
-            restoreSources.PackageSourceMappings is not null;
-        var hasCredentialBearingMappedSource = useMappedRestoreConfig &&
+        var usesAmbientNuGetConfiguration = string.IsNullOrWhiteSpace(packageSourceOverride);
+        var hasMappedRestoreSources = restoreSources.PackageSourceMappings is not null;
+        var useComposedRestoreConfig = usesAmbientNuGetConfiguration && hasMappedRestoreSources;
+        var usePersistentRestoreConfig = !usesAmbientNuGetConfiguration && hasMappedRestoreSources;
+        var hasCredentialBearingMappedSource = hasMappedRestoreSources &&
             restoreSources.PackageSourceMappings!.Any(
                 static mapping => PackageSourceOverrideMappings.HasCredentialMaterial(mapping.Source));
-        var hasCredentialBearingAdditionalSource = !useMappedRestoreConfig &&
+        var hasCredentialBearingAdditionalSource = !hasMappedRestoreSources &&
             restoreSources.AdditionalSources.Any(
                 static source => PackageSourceOverrideMappings.HasCredentialMaterial(source));
-        var hasCredentialBearingRestoreSource =
-            hasCredentialBearingMappedSource || hasCredentialBearingAdditionalSource;
 
-        if (!useMappedRestoreConfig || hasCredentialBearingMappedSource)
+        if (!usePersistentRestoreConfig || hasCredentialBearingMappedSource)
         {
             var persistentRestoreConfigFile = new FileInfo(Path.Combine(restoreDir, "nuget.config"));
             if (persistentRestoreConfigFile.Exists)
@@ -766,37 +766,33 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
             }
         }
 
-        if (hasCredentialBearingRestoreSource)
-        {
-            var restoreStampFile = new FileInfo(Path.Combine(restoreDir, "obj", RestoreStampFileName));
-            if (restoreStampFile.Exists)
-            {
-                restoreStampFile.Delete();
-            }
-        }
-
-        using var temporaryRestoreConfig = hasCredentialBearingMappedSource
-            ? await CreateTemporaryNuGetConfigAsync(restoreSources).ConfigureAwait(false)
-            : null;
+        using var temporaryRestoreConfig = useComposedRestoreConfig
+            ? await CreateComposedNuGetConfigAsync(restoreDir, restoreSources, cancellationToken).ConfigureAwait(false)
+            : hasCredentialBearingMappedSource
+                ? await CreateTemporaryNuGetConfigAsync(restoreSources).ConfigureAwait(false)
+                : null;
         using var temporaryRestoreSourcesProps = hasCredentialBearingAdditionalSource
             ? await TemporaryRestoreSourcesProps.CreateAsync(restoreSources.AdditionalSources, cancellationToken).ConfigureAwait(false)
             : null;
+        var hasCredentialBearingRestoreSource =
+            hasCredentialBearingMappedSource ||
+            hasCredentialBearingAdditionalSource ||
+            temporaryRestoreConfig?.ContainsCredentialMaterial == true;
 
         FileInfo? restoreConfigFile;
         string? restoreConfigContent;
-        if (!useMappedRestoreConfig)
+        if (temporaryRestoreConfig is not null)
         {
-            // Channel-only restores remain additive so NuGet continues discovering the user's
-            // ambient configuration, including private feeds used by the project-reference graph.
-            restoreConfigFile = null;
-            restoreConfigContent = null;
-        }
-        else if (temporaryRestoreConfig is not null)
-        {
-            // Credential-bearing mapped URLs must exist only for the duration of this build.
-            // Persisting the generated config under .aspire/integrations would retain credentials
-            // from sources such as overrideStagingFeed after the command exits.
             restoreConfigFile = temporaryRestoreConfig.ConfigFile;
+            restoreConfigContent = hasCredentialBearingRestoreSource
+                ? null
+                : await File.ReadAllTextAsync(restoreConfigFile.FullName, cancellationToken).ConfigureAwait(false);
+        }
+        else if (!usePersistentRestoreConfig)
+        {
+            // With no single requested channel there is no unambiguous mapping to apply. Preserve
+            // ambient discovery and add every explicit channel source, matching the existing fallback.
+            restoreConfigFile = null;
             restoreConfigContent = null;
         }
         else
@@ -820,6 +816,16 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
             restoreSourcesPropsFile: temporaryRestoreSourcesProps?.PropsFile.FullName);
         var projectFilePath = Path.Combine(restoreDir, IntegrationProjectFileName);
         await WriteIfChangedAsync(projectFilePath, projectContent, cancellationToken);
+        var fingerprintProjectContent = temporaryRestoreConfig is null
+            ? projectContent
+            : GenerateIntegrationProjectFile(
+                packageRefs,
+                projectRefs,
+                restoreDir,
+                channelSources,
+                useExactPackageVersions: !string.IsNullOrWhiteSpace(packageSourceOverride),
+                restoreConfigFile: "__temporary_nuget_config__",
+                restoreSourcesPropsFile: temporaryRestoreSourcesProps?.PropsFile.FullName);
 
         // Write a Directory.Packages.props to opt out of Central Package Management
         var directoryPackagesProps = """
@@ -853,10 +859,28 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
         // fingerprint cannot see, a no-restore build that fails on the assets file is retried with
         // restore rather than reported.
         string? restoreFingerprint = null;
-        if (!hasCredentialBearingRestoreSource)
+        var hasCompleteNuGetConfigurationFingerprint =
+            !usesAmbientNuGetConfiguration || useComposedRestoreConfig;
+        if (!hasCredentialBearingRestoreSource && hasCompleteNuGetConfigurationFingerprint)
         {
-            var restoreInputs = await ComputeRestoreInputsAsync(projectContent, packageRefs, projectRefs, restoreConfigContent, cancellationToken).ConfigureAwait(false);
+            var restoreInputs = await ComputeRestoreInputsAsync(
+                fingerprintProjectContent,
+                packageRefs,
+                projectRefs,
+                restoreConfigContent,
+                cancellationToken).ConfigureAwait(false);
             restoreFingerprint = restoreInputs.IsEligibleForSkip ? restoreInputs.Fingerprint : null;
+        }
+
+        if (restoreFingerprint is null)
+        {
+            // A restore that cannot prove all of its inputs must invalidate any stamp from a
+            // previous source configuration before it replaces the assets file.
+            var restoreStampFile = new FileInfo(Path.Combine(restoreDir, "obj", RestoreStampFileName));
+            if (restoreStampFile.Exists)
+            {
+                restoreStampFile.Delete();
+            }
         }
 
         var skipRestore = restoreFingerprint is not null && CanSkipIntegrationRestore(restoreDir, restoreFingerprint, _logger);
@@ -1015,6 +1039,30 @@ internal sealed partial class PrebuiltAppHostServer : IAppHostServerProject, IDi
             restoreSources.ConfigureGlobalPackagesFolder
                 ? CliPathHelper.GetStagingNuGetPackagesFeedDirectory(_executionContext.AspireHomeDirectory, restoreSources.GlobalPackagesFolderSource)
                 : null).ConfigureAwait(false);
+    }
+
+    private async Task<TemporaryNuGetConfig> CreateComposedNuGetConfigAsync(
+        string restoreDir,
+        IntegrationRestoreSources restoreSources,
+        CancellationToken cancellationToken)
+    {
+        var (exitCode, configPaths) = await _dotNetCliRunner.GetNuGetConfigPathsAsync(
+            new DirectoryInfo(restoreDir),
+            new ProcessInvocationOptions { SuppressLogging = true },
+            cancellationToken).ConfigureAwait(false);
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException($"Unable to discover the NuGet configuration hierarchy for '{restoreDir}'.");
+        }
+
+        return await TemporaryNuGetConfig.CreateComposedAsync(
+            configPaths,
+            restoreSources.PackageSourceMappings!,
+            restoreSources.ConfigureGlobalPackagesFolder,
+            restoreSources.ConfigureGlobalPackagesFolder
+                ? CliPathHelper.GetStagingNuGetPackagesFeedDirectory(_executionContext.AspireHomeDirectory, restoreSources.GlobalPackagesFolderSource)
+                : null,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<FileInfo?> WriteRestoreNuGetConfigAsync(string restoreDir, IntegrationRestoreSources restoreSources, CancellationToken cancellationToken)
