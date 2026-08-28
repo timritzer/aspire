@@ -91,8 +91,9 @@ jobs:
               RUN_SCOPE="pull-request"
               ;;
             *)
-              echo "::error::Unsupported run scope: event=${RUN_EVENT}, branch=${HEAD_BRANCH}"
-              exit 1
+              echo "::notice::Unsupported run scope: event=${RUN_EVENT}, branch=${HEAD_BRANCH}. Skipping analysis."
+              echo "has_work=false" >> "$GITHUB_OUTPUT"
+              exit 0
               ;;
           esac
           echo "run_attempt=${RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
@@ -140,11 +141,14 @@ jobs:
 
             WORKFLOW_ID=$(jq -r '.workflow_id' ci-failure-data/run.json)
             RUN_CREATED_AT=$(jq -r '.created_at' ci-failure-data/run.json)
-            gh api --paginate --method GET "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs" \
-              -f branch=main -f event=push -f status=success -f "created=<${RUN_CREATED_AT}" \
-              --jq '.workflow_runs[]' 2>/dev/null \
-              | jq -s 'sort_by(.created_at) | last // {}' \
-              > ci-failure-data/last-successful-main-run.json
+            if ! gh api --paginate --method GET "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs" \
+                -f branch=main -f event=push -f status=success -f "created=<${RUN_CREATED_AT}" \
+                --jq '.workflow_runs[]' 2>/dev/null \
+                | jq -s 'sort_by(.created_at) | last // {}' \
+                > ci-failure-data/last-successful-main-run.json; then
+              echo "::warning::Unable to find the last successful main run. Continuing without a candidate merge range."
+              echo "{}" > ci-failure-data/last-successful-main-run.json
+            fi
 
             LAST_SUCCESSFUL_SHA=$(jq -r '.head_sha // ""' ci-failure-data/last-successful-main-run.json)
             echo "[]" > ci-failure-data/candidate-merges.json
@@ -581,6 +585,7 @@ safe-outputs:
             set -euo pipefail
 
             ANALYSIS_FILE="$(dirname "$GH_AW_AGENT_OUTPUT")/agent/analysis-result.json"
+            CAUSES_DIR="$(dirname "$GH_AW_AGENT_OUTPUT")/agent/causes"
             RUN_CONTEXT_FILE="ci-failure-data/run-context.json"
             if [ ! -f "$ANALYSIS_FILE" ] || [ ! -f "$RUN_CONTEXT_FILE" ]; then
               echo "::error::Analysis result or trusted run context not found"
@@ -604,6 +609,33 @@ safe-outputs:
             if [ "$TRUSTED_RUN_SCOPE" = "pull-request" ] && [ "$VERDICT" = "main-repository-breakage" ]; then
               echo "::error::Pull request run analysis cannot use the main repository breakage verdict"
               exit 1
+            fi
+
+            if [ -d "$CAUSES_DIR" ]; then
+              for CAUSE_FILE in "$CAUSES_DIR"/*.json; do
+                [ -f "$CAUSE_FILE" ] || continue
+                if ! jq empty "$CAUSE_FILE" 2>/dev/null; then
+                  echo "::error::Invalid JSON in cause file: $(basename "$CAUSE_FILE")"
+                  exit 1
+                fi
+
+                CAUSE_BASENAME=$(basename "$CAUSE_FILE")
+                CAUSE_ID=$(jq -r '.id // ""' "$CAUSE_FILE")
+                CAUSE_TYPE=$(jq -r '.type // ""' "$CAUSE_FILE")
+                if [[ ! "$CAUSE_ID" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || [ "${CAUSE_ID}.json" != "$CAUSE_BASENAME" ]; then
+                  echo "::error::Cause ID must be a lowercase hyphenated slug matching its filename: ${CAUSE_BASENAME}"
+                  exit 1
+                fi
+
+                case "${TRUSTED_RUN_SCOPE}:${CAUSE_TYPE}" in
+                  main:flaky-test|main:infra-failure|main:main-repository-breakage|pull-request:flaky-test|pull-request:infra-failure)
+                    ;;
+                  *)
+                    echo "::error::Cause ${CAUSE_BASENAME} type '${CAUSE_TYPE}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}"
+                    exit 1
+                    ;;
+                esac
+              done
             fi
         - name: Publish analysis data and comment on PR
           run: |
@@ -1026,6 +1058,10 @@ safe-outputs:
           required: true
           type: string
       steps:
+        - uses: actions/download-artifact@v4
+          with:
+            name: ci-failure-data
+            path: ci-failure-data/
         - name: Rerun failed jobs
           uses: actions/github-script@v9.0.0
           env:
@@ -1033,6 +1069,7 @@ safe-outputs:
           with:
             script: |
               const fs = require('fs');
+              const path = require('path');
 
               // Read inputs from the agent output artifact.
               // gh-aw writes { "items": [ { "type": "rerun_failed_jobs", ... } ] }.
@@ -1049,50 +1086,82 @@ safe-outputs:
                 return;
               }
 
+              const analysisFile = path.join(path.dirname(outputFile), 'agent', 'analysis-result.json');
+              const runContextFile = path.join('ci-failure-data', 'run-context.json');
+              if (!fs.existsSync(analysisFile) || !fs.existsSync(runContextFile)) {
+                core.setFailed('Analysis result or trusted run context not found');
+                return;
+              }
+
+              const analysis = JSON.parse(fs.readFileSync(analysisFile, 'utf8'));
+              const runContext = JSON.parse(fs.readFileSync(runContextFile, 'utf8'));
               const owner = context.repo.owner;
               const repo = context.repo.repo;
-              const runId = Number(item.run_id);
-              const prNumbers = String(item.pr_numbers).split(',').map(Number).filter(n => n > 0);
+              const requestedRunId = Number(item.run_id);
+              const trustedRunId = Number(runContext.run_id);
+              const requestedPrNumbers = String(item.pr_numbers || '');
+              const trustedPrNumberText = String(runContext.pr_numbers || '');
+              const trustedRunScope = String(runContext.run_scope || '');
               const reason = item.reason || '';
               const enableRerun = String(process.env.ENABLE_RERUN).toLowerCase() === 'true';
 
-              if (!Number.isInteger(runId) || runId <= 0) {
+              if (!Number.isInteger(requestedRunId) || requestedRunId <= 0) {
                 core.setFailed(`Invalid run_id: ${item.run_id}`);
+                return;
+              }
+              if (!Number.isInteger(trustedRunId) || trustedRunId <= 0) {
+                core.setFailed(`Invalid trusted run_id: ${runContext.run_id}`);
+                return;
+              }
+              if (requestedRunId !== trustedRunId || requestedPrNumbers !== trustedPrNumberText) {
+                core.setFailed('Rerun request does not match trusted run context');
+                return;
+              }
+              if (Number(analysis.run_id) !== trustedRunId ||
+                  analysis.run_scope !== trustedRunScope ||
+                  analysis.verdict !== 'transient-infra') {
+                core.setFailed('Rerun requires a trusted transient-infra analysis for the same run');
+                return;
+              }
+              if (trustedRunScope !== 'main' && trustedRunScope !== 'pull-request') {
+                core.setFailed(`Unsupported trusted run scope: ${trustedRunScope}`);
                 return;
               }
 
               if (!enableRerun) {
-                core.info(`Dry-run mode (ENABLE_RERUN is not 'true'). Would have rerun failed jobs for run ${runId}. Reason: ${reason}`);
+                core.info(`Dry-run mode (ENABLE_RERUN is not 'true'). Would have rerun failed jobs for run ${trustedRunId}. Reason: ${reason}`);
                 return;
               }
 
-              // Verify at least one PR is still open
-              let hasOpenPr = false;
-              for (const prNumber of prNumbers) {
-                try {
-                  const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-                  if (pr.state === 'open') {
-                    hasOpenPr = true;
-                    break;
+              if (trustedRunScope === 'pull-request') {
+                const trustedPrNumbers = trustedPrNumberText.split(',').map(Number).filter(n => n > 0);
+                let hasOpenPr = false;
+                for (const prNumber of trustedPrNumbers) {
+                  try {
+                    const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+                    if (pr.state === 'open') {
+                      hasOpenPr = true;
+                      break;
+                    }
+                  } catch (e) {
+                    core.warning(`Failed to check PR #${prNumber}: ${e.message}`);
                   }
-                } catch (e) {
-                  core.warning(`Failed to check PR #${prNumber}: ${e.message}`);
                 }
-              }
 
-              if (!hasOpenPr) {
-                core.info('All associated PRs are closed. Skipping rerun.');
-                return;
+                if (!hasOpenPr) {
+                  core.info('All associated PRs are closed. Skipping rerun.');
+                  return;
+                }
               }
 
               // Request rerun of failed jobs
               await github.rest.actions.reRunWorkflowFailedJobs({
                 owner,
                 repo,
-                run_id: runId,
+                run_id: trustedRunId,
               });
 
-              core.info(`Requested rerun of failed jobs for run ${runId}. Reason: ${reason}`);
+              core.info(`Requested rerun of failed jobs for run ${trustedRunId}. Reason: ${reason}`);
 
 steps:
   - uses: actions/download-artifact@v4.3.0
