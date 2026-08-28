@@ -26,7 +26,11 @@ public sealed class AnalyzeCiFailureWorkflowTests
             Assert.Contains("pull_request:*|pull_request_target:*)", workflow, StringComparison.Ordinal);
             Assert.Contains("RUN_SCOPE=\"main\"", workflow, StringComparison.Ordinal);
             Assert.Contains("RUN_SCOPE=\"pull-request\"", workflow, StringComparison.Ordinal);
-            Assert.Contains("echo \"has_work=false\" >> \"$GITHUB_OUTPUT\"\nexit 0", workflow, StringComparison.Ordinal);
+            var scopeCase = GetSection(workflow, "case \"${RUN_EVENT}:${HEAD_BRANCH}\" in", "esac");
+            Assert.Contains(
+                "*)\necho \"::notice::Unsupported run scope: event=${RUN_EVENT}, branch=${HEAD_BRANCH}. Skipping analysis.\"\necho \"has_work=false\" >> \"$GITHUB_OUTPUT\"\nexit 0",
+                scopeCase,
+                StringComparison.Ordinal);
             Assert.Contains("run_scope: $run_scope", workflow, StringComparison.Ordinal);
         });
     }
@@ -81,9 +85,12 @@ public sealed class AnalyzeCiFailureWorkflowTests
             Assert.Contains("RUN_CONTEXT_FILE=\"ci-failure-data/run-context.json\"", workflow, StringComparison.Ordinal);
             Assert.Contains("ANALYSIS_RUN_SCOPE=$(jq -r '.run_scope' \"$ANALYSIS_FILE\")", workflow, StringComparison.Ordinal);
             Assert.Contains("Analysis result does not match trusted run context\"\nexit 1", workflow, StringComparison.Ordinal);
-            Assert.Contains("Main run analysis must not identify a subject PR or use the PR code-issue verdict\"\nexit 1", workflow, StringComparison.Ordinal);
-            Assert.Contains("Pull request run analysis cannot use the main repository breakage verdict\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("Main run analysis must not identify a subject PR\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("Verdict '${VERDICT}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("type '${CAUSE_TYPE}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("A transient-infra verdict requires at least one infra-failure cause and no other cause types\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("A code-issue verdict must not include cause files\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("A main-repository-breakage verdict requires a matching cause file\"\nexit 1", workflow, StringComparison.Ordinal);
         });
     }
 
@@ -93,7 +100,7 @@ public sealed class AnalyzeCiFailureWorkflowTests
         ForEachExecutableWorkflow(workflow =>
         {
             Assert.Contains("const trustedRunId = Number(runContext.run_id);", workflow, StringComparison.Ordinal);
-            Assert.Contains("requestedRunId !== trustedRunId || requestedPrNumbers !== trustedPrNumberText", workflow, StringComparison.Ordinal);
+            Assert.Contains("requestedRunId !== trustedRunId", workflow, StringComparison.Ordinal);
             Assert.Contains("analysis.verdict !== 'transient-infra'", workflow, StringComparison.Ordinal);
             Assert.Contains("if (trustedRunScope === 'pull-request')", workflow, StringComparison.Ordinal);
             Assert.Contains("run_id: trustedRunId", workflow, StringComparison.Ordinal);
@@ -110,6 +117,15 @@ public sealed class AnalyzeCiFailureWorkflowTests
 
     private static string NormalizeIndentation(string value)
         => string.Join('\n', value.ReplaceLineEndings("\n").Split('\n').Select(line => line.TrimStart()));
+
+    private static string GetSection(string value, string start, string end)
+    {
+        var startIndex = value.IndexOf(start, StringComparison.Ordinal);
+        Assert.True(startIndex >= 0, $"Could not find section start: {start}");
+        var endIndex = value.IndexOf(end, startIndex, StringComparison.Ordinal);
+        Assert.True(endIndex >= 0, $"Could not find section end: {end}");
+        return value[startIndex..(endIndex + end.Length)];
+    }
 
     private static string ReadWorkflow(string fileName)
         => File.ReadAllText(Path.Combine(RepoRoot.Path, ".github", "workflows", fileName));

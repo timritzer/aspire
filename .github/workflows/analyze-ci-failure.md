@@ -602,15 +602,23 @@ safe-outputs:
               echo "::error::Analysis result does not match trusted run context"
               exit 1
             fi
-            if [ "$TRUSTED_RUN_SCOPE" = "main" ] && { [ "$(jq -r '.pr // null' "$ANALYSIS_FILE")" != "null" ] || [ "$VERDICT" = "code-issue" ]; }; then
-              echo "::error::Main run analysis must not identify a subject PR or use the PR code-issue verdict"
-              exit 1
-            fi
-            if [ "$TRUSTED_RUN_SCOPE" = "pull-request" ] && [ "$VERDICT" = "main-repository-breakage" ]; then
-              echo "::error::Pull request run analysis cannot use the main repository breakage verdict"
+            if [ "$TRUSTED_RUN_SCOPE" = "main" ] && [ "$(jq -r '.pr // null' "$ANALYSIS_FILE")" != "null" ]; then
+              echo "::error::Main run analysis must not identify a subject PR"
               exit 1
             fi
 
+            case "${TRUSTED_RUN_SCOPE}:${VERDICT}" in
+              main:transient-infra|main:flaky-test|main:main-repository-breakage|main:mixed|pull-request:transient-infra|pull-request:flaky-test|pull-request:code-issue|pull-request:mixed)
+                ;;
+              *)
+                echo "::error::Verdict '${VERDICT}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}"
+                exit 1
+                ;;
+            esac
+
+            CAUSE_COUNT=0
+            INFRA_CAUSE_COUNT=0
+            MAIN_BREAK_CAUSE_COUNT=0
             if [ -d "$CAUSES_DIR" ]; then
               for CAUSE_FILE in "$CAUSES_DIR"/*.json; do
                 [ -f "$CAUSE_FILE" ] || continue
@@ -635,8 +643,51 @@ safe-outputs:
                     exit 1
                     ;;
                 esac
+
+                CAUSE_COUNT=$((CAUSE_COUNT + 1))
+                case "$CAUSE_TYPE" in
+                  infra-failure)
+                    INFRA_CAUSE_COUNT=$((INFRA_CAUSE_COUNT + 1))
+                    ;;
+                  main-repository-breakage)
+                    MAIN_BREAK_CAUSE_COUNT=$((MAIN_BREAK_CAUSE_COUNT + 1))
+                    ;;
+                esac
               done
             fi
+
+            case "$VERDICT" in
+              transient-infra)
+                if [ "$CAUSE_COUNT" -eq 0 ] || [ "$INFRA_CAUSE_COUNT" -ne "$CAUSE_COUNT" ]; then
+                  echo "::error::A transient-infra verdict requires at least one infra-failure cause and no other cause types"
+                  exit 1
+                fi
+                ;;
+              flaky-test)
+                if [ "$CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne 0 ]; then
+                  echo "::error::A flaky-test verdict requires at least one transient cause and no main repository breakage causes"
+                  exit 1
+                fi
+                ;;
+              code-issue)
+                if [ "$CAUSE_COUNT" -ne 0 ]; then
+                  echo "::error::A code-issue verdict must not include cause files"
+                  exit 1
+                fi
+                ;;
+              main-repository-breakage)
+                if [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ]; then
+                  echo "::error::A main-repository-breakage verdict requires a matching cause file"
+                  exit 1
+                fi
+                ;;
+              mixed)
+                if [ "$CAUSE_COUNT" -eq 0 ]; then
+                  echo "::error::A mixed verdict requires at least one transient or main-breakage cause file"
+                  exit 1
+                fi
+                ;;
+            esac
         - name: Publish analysis data and comment on PR
           run: |
             set -euo pipefail
@@ -724,11 +775,6 @@ safe-outputs:
 
                 for CAUSE_FILE in "$CAUSES_DIR"/*.json; do
                   [ -f "$CAUSE_FILE" ] || continue
-                  # Skip code-issue causes — only persist transient/flaky causes.
-                  CAUSE_TYPE_CHECK=$(jq -r '.type' "$CAUSE_FILE" 2>/dev/null || echo "")
-                  if [ "$CAUSE_TYPE_CHECK" = "code-issue" ]; then
-                    continue
-                  fi
                   CAUSE_BASENAME=$(basename "$CAUSE_FILE")
                   EXISTING="memory-repo/causes/${CAUSE_BASENAME}"
 
@@ -791,13 +837,6 @@ safe-outputs:
                 fi
 
                 CAUSE_TYPE=$(jq -r '.type' "$CAUSE_FILE")
-
-                # Skip issue creation for code-issue causes — those are the
-                # PR author's responsibility, not a recurring CI problem.
-                if [ "$CAUSE_TYPE" = "code-issue" ]; then
-                  echo "Skipping issue for code-issue cause: ${CAUSE_ID}"
-                  continue
-                fi
 
                 CAUSE_STORED="memory-repo/causes/${CAUSE_ID}.json"
                 MARKER="<!-- ci-failure-cause:${CAUSE_ID} -->"
@@ -1099,7 +1138,6 @@ safe-outputs:
               const repo = context.repo.repo;
               const requestedRunId = Number(item.run_id);
               const trustedRunId = Number(runContext.run_id);
-              const requestedPrNumbers = String(item.pr_numbers || '');
               const trustedPrNumberText = String(runContext.pr_numbers || '');
               const trustedRunScope = String(runContext.run_scope || '');
               const reason = item.reason || '';
@@ -1113,7 +1151,7 @@ safe-outputs:
                 core.setFailed(`Invalid trusted run_id: ${runContext.run_id}`);
                 return;
               }
-              if (requestedRunId !== trustedRunId || requestedPrNumbers !== trustedPrNumberText) {
+              if (requestedRunId !== trustedRunId) {
                 core.setFailed('Rerun request does not match trusted run context');
                 return;
               }
