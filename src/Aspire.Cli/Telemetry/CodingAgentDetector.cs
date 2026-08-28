@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Microsoft.Extensions.Configuration;
+using Aspire.Cli.Agents.CopilotApp;
 
 namespace Aspire.Cli.Telemetry;
 
@@ -23,7 +24,7 @@ internal sealed class CodingAgentDetector(IConfiguration configuration) : ICodin
         new("copilot-cli", ["COPILOT_CLI", "GITHUB_COPILOT_CLI_MODE", "GH_COPILOT_WORKING_DIRECTORY", "COPILOT_MODEL", "COPILOT_ALLOW_ALL", "COPILOT_GITHUB_TOKEN"]),
         // GitHub Copilot app (the desktop GitHub application running as an AI agent), which sets AI_AGENT=github_copilot_app_agent.
         // Keep this before copilot-vscode to preserve the dotnet CLI's detection order.
-        new("copilot-app", ["AI_AGENT"], "github_copilot_app_agent"),
+        new("copilot-app", [CopilotAppInstallationDetector.AgentEnvironmentVariable], CopilotAppInstallationDetector.AgentEnvironmentValue),
         // GitHub Copilot agent mode in VS Code, which sets AI_AGENT=github_copilot_vscode_agent and COPILOT_AGENT=1 on the terminals it runs commands in.
         // See https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/toolTerminalCreator.ts
         new("copilot-vscode", ["AI_AGENT"], "github_copilot_vscode_agent"),

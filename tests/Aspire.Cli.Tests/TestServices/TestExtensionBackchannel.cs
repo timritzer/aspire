@@ -46,6 +46,7 @@ internal sealed class TestExtensionBackchannel : IExtensionBackchannel
     public TaskCompletionSource? PromptForSelectionAsyncCalled { get; set; }
 
     public TaskCompletionSource? PromptForSelectionsAsyncCalled { get; set; }
+    public IReadOnlyList<object>? PromptForSelectionsPreSelected { get; private set; }
 
     public TaskCompletionSource? ConfirmAsyncCalled { get; set; }
     public Func<string, bool, Task<bool>>? ConfirmAsyncCallback { get; set; }
@@ -175,9 +176,15 @@ internal sealed class TestExtensionBackchannel : IExtensionBackchannel
         return Task.FromResult(choices.First());
     }
 
-    public Task<IReadOnlyList<T>> PromptForSelectionsAsync<T>(string promptText, IEnumerable<T> choices, Func<T, string> choiceFormatter, CancellationToken cancellationToken) where T : notnull
+    public Task<IReadOnlyList<T>> PromptForSelectionsAsync<T>(
+        string promptText,
+        IEnumerable<T> choices,
+        Func<T, string> choiceFormatter,
+        IEnumerable<T>? preSelected,
+        CancellationToken cancellationToken) where T : notnull
     {
         PromptForSelectionsAsyncCalled?.SetResult();
+        PromptForSelectionsPreSelected = preSelected?.Cast<object>().ToList();
 
         if (!choices.Any())
         {

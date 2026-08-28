@@ -160,6 +160,31 @@ suite('InteractionService endpoints', () => {
 		showQuickPickStub.restore();
 	});
 
+	test('promptForSelections marks provided choices as preselected', async () => {
+		const testInfo = await createTestRpcServer();
+		const showQuickPickStub = sinon.stub(vscode.window, 'showQuickPick').resolves(
+			[
+				{ label: 'second', picked: true },
+				{ label: 'third', picked: true },
+			] as never);
+
+		const result = await testInfo.interactionService.promptForSelections(
+			'Select items',
+			['first', 'second', 'third'],
+			['second', 'third']);
+
+		assert.deepStrictEqual(result, ['second', 'third']);
+		const items = showQuickPickStub.firstCall.args[0] as readonly vscode.QuickPickItem[];
+		assert.deepStrictEqual(
+			items.map(item => ({ label: item.label, picked: item.picked })),
+			[
+				{ label: 'first', picked: false },
+				{ label: 'second', picked: true },
+				{ label: 'third', picked: true },
+			]);
+		showQuickPickStub.restore();
+	});
+
 	test('startDebugSession forwards CLI environment to the debug configuration', async () => {
 		const testInfo = await createTestRpcServer();
 		const startDebuggingStub = sinon.stub(vscode.debug, 'startDebugging').resolves(true);

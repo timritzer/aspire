@@ -20,6 +20,155 @@ namespace Aspire.Cli.Tests.Commands;
 public class AgentInitCommandTests(ITestOutputHelper outputHelper)
 {
     [Fact]
+    public async Task PromptAndChainAsync_TracksSelectionForEveryDeclaredAgentAssetKind()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var interactionService = new TestInteractionService();
+        interactionService.PromptForSelectionsCallback = (_, choices, _, _) => choices.Cast<object>()
+            .Where(choice => choice switch
+            {
+                AgentAssetLocation location => location == AgentAssetLocation.Standard || location == AgentAssetLocation.ProjectExtensions,
+                AgentAssetDefinition asset => asset.HasName(CommonAgentApplicators.AspireSkillName) || asset.HasName("aspire-doctor"),
+                _ => false
+            })
+            .ToList();
+        FakeAspireSkillsInstaller? installer = null;
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ => interactionService;
+            options.AgentEnvironmentDetectorFactory = _ =>
+                new FakeDetectingDetector(AgentClient.CopilotApp);
+            options.AspireSkillsInstallerFactory = serviceProvider =>
+                installer = new FakeAspireSkillsInstaller(serviceProvider.GetRequiredService<CliExecutionContext>());
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<AgentInitCommand>();
+
+        var result = await command.PromptAndChainAsync(
+            interactionService,
+            CliExitCodes.Success,
+            workspace.WorkspaceRoot,
+            PromptBinding.CreateDefault(true),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            null,
+            TestContext.Current.CancellationToken).DefaultTimeout();
+
+        var declaredAssetKinds = Enum.GetValues<AgentAssetKind>();
+        Assert.Equal(CliExitCodes.Success, result.ExitCode);
+        Assert.Equal(declaredAssetKinds, installer!.RequestedAssetKinds);
+        Assert.Equal(declaredAssetKinds, result.LocationsByAssetKind.Keys);
+        Assert.Equal(declaredAssetKinds, result.AssetsByAssetKind.Keys);
+
+        Assert.Equal([AgentAssetLocation.Standard], result.GetLocations(AgentAssetKind.Skill));
+        var skill = Assert.Single(result.GetAssets(AgentAssetKind.Skill));
+        Assert.Equal(CommonAgentApplicators.AspireSkillName, skill.Name);
+        Assert.Equal([AgentAssetLocation.ProjectExtensions], result.GetLocations(AgentAssetKind.Extension));
+        var extension = Assert.Single(result.GetAssets(AgentAssetKind.Extension));
+        Assert.Equal("aspire-doctor", extension.Name);
+    }
+
+    [Fact]
+    public async Task PromptAndChainAsync_SkipsExtensionPromptsWithoutCompatibleDetectedClient()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var interactionService = new TestInteractionService();
+        var promptedKinds = new List<string>();
+        interactionService.PromptForSelectionsCallback = (prompt, choices, _, _) =>
+        {
+            promptedKinds.Add(prompt);
+            return choices.Cast<object>()
+                .Where(choice => choice switch
+                {
+                    AgentAssetLocation location => location == AgentAssetLocation.Standard,
+                    AgentAssetDefinition asset => asset.HasName(CommonAgentApplicators.AspireSkillName),
+                    _ => false
+                })
+                .ToList();
+        };
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ => interactionService;
+            options.AgentEnvironmentDetectorFactory = _ =>
+                new FakeDetectingDetector(AgentClient.CopilotCli);
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<AgentInitCommand>();
+
+        var result = await command.PromptAndChainAsync(
+            interactionService,
+            CliExitCodes.Success,
+            workspace.WorkspaceRoot,
+            PromptBinding.CreateDefault(true),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            null,
+            TestContext.Current.CancellationToken).DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, result.ExitCode);
+        Assert.Empty(result.GetLocations(AgentAssetKind.Extension));
+        Assert.Empty(result.GetAssets(AgentAssetKind.Extension));
+        Assert.DoesNotContain(AgentCommandStrings.InitCommand_SelectExtensionLocations, promptedKinds);
+        Assert.DoesNotContain(AgentCommandStrings.InitCommand_SelectExtensions, promptedKinds);
+    }
+
+    [Fact]
+    public async Task PromptAndChainAsync_InstallsCliDefinedAsset_WhenKindHasNoBundle()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        await File.WriteAllTextAsync(
+            Path.Combine(workspace.WorkspaceRoot.FullName, "AppHost.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />",
+            TestContext.Current.CancellationToken);
+        var interactionService = new TestInteractionService();
+        interactionService.PromptForSelectionsCallback = (_, choices, _, _) => choices.Cast<object>()
+            .Where(choice => choice switch
+            {
+                AgentAssetLocation location => location == AgentAssetLocation.Standard,
+                AgentAssetDefinition asset => asset == AgentAssetDefinition.DotnetInspect,
+                _ => false
+            })
+            .ToList();
+        FakeAspireSkillsInstaller? installer = null;
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ => interactionService;
+            options.AspireSkillsInstallerFactory = serviceProvider =>
+                installer = new FakeAspireSkillsInstaller(
+                    serviceProvider.GetRequiredService<CliExecutionContext>(),
+                    result: null,
+                    hasBundle: false);
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<AgentInitCommand>();
+
+        var result = await command.PromptAndChainAsync(
+            interactionService,
+            CliExitCodes.Success,
+            workspace.WorkspaceRoot,
+            PromptBinding.CreateDefault(true),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            null,
+            TestContext.Current.CancellationToken).DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, result.ExitCode);
+        Assert.NotNull(installer);
+        Assert.Equal([AgentAssetKind.Skill], installer.RequestedAssetKinds);
+        Assert.Equal([AgentAssetDefinition.DotnetInspect], result.GetAssets(AgentAssetKind.Skill));
+        AssertSkillFileExists(
+            workspace.WorkspaceRoot,
+            Path.Combine(".agents", "skills"),
+            CommonAgentApplicators.DotnetInspectSkillName);
+    }
+
+    [Fact]
     public async Task AgentInitCommand_SummarizesNormalizedDisplayPath_WhenInstallingUserLevelSkill()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
@@ -29,8 +178,8 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         interactionService.PromptForSelectionsCallback = (_, choices, _, _) => choices.Cast<object>()
             .Where(choice => choice switch
             {
-                SkillLocation location => location == SkillLocation.Standard,
-                SkillDefinition skill => skill.HasName(CommonAgentApplicators.AspireSkillName),
+                AgentAssetLocation location => location == AgentAssetLocation.Standard,
+                AgentAssetDefinition asset => asset.HasName(CommonAgentApplicators.AspireSkillName),
                 _ => false
             })
             .ToList();
@@ -61,6 +210,422 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task AgentInitCommand_ExtensionOptionsInstallProjectExtension()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var interactionService = new TestInteractionService();
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ => interactionService;
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Extension]));
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations none --skills none --extension-locations project --extensions aspire-doctor");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        var extensionPath = Path.Combine(
+            workspace.WorkspaceRoot.FullName,
+            ".github",
+            "extensions",
+            "aspire-doctor",
+            "extension.mjs");
+        Assert.True(File.Exists(extensionPath), $"Expected extension at {extensionPath}");
+        var binaryPath = Path.Combine(
+            workspace.WorkspaceRoot.FullName,
+            ".github",
+            "extensions",
+            "aspire-doctor",
+            "ui",
+            "icon.bin");
+        var binaryContent = await File.ReadAllBytesAsync(binaryPath);
+        Assert.Equal<byte>([0x00, 0xff, 0x80, 0x0a], binaryContent);
+        Assert.Contains(
+            interactionService.DisplayedMessages,
+            message => message.Emoji.Equals(KnownEmojis.Warning) &&
+                message.Message == AgentCommandStrings.InitCommand_NoCompatibleClientForExplicitExtensions);
+    }
+
+    [Fact]
+    public async Task AgentInitCommand_ExtensionUpgradeRemovesFilesMissingFromBundle()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var extensionDirectory = workspace.CreateDirectory(
+            Path.Combine(".github", "extensions", "aspire-doctor"));
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory.FullName, "obsolete.mjs"),
+            "obsolete",
+            TestContext.Current.CancellationToken);
+        var obsoleteUiDirectory = extensionDirectory.CreateSubdirectory("obsolete-ui");
+        await File.WriteAllTextAsync(
+            Path.Combine(obsoleteUiDirectory.FullName, "old.js"),
+            "obsolete",
+            TestContext.Current.CancellationToken);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Extension]));
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations none --skills none --extension-locations project --extensions aspire-doctor");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.Equal(
+            [
+                "extension.mjs",
+                Path.Combine("ui", "icon.bin"),
+            ],
+            Directory.EnumerateFiles(extensionDirectory.FullName, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(extensionDirectory.FullName, path))
+                .Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    [SkipOnPlatform(TestPlatforms.Windows | TestPlatforms.OSX | TestPlatforms.FreeBSD, "Validates case-sensitive Linux extension paths.")]
+    public async Task AgentInitCommand_ExtensionUpgradeRemovesDifferentlyCasedStaleFileOnLinux()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var extensionDirectory = workspace.CreateDirectory(
+            Path.Combine(".github", "extensions", "aspire-doctor"));
+        var differentlyCasedDirectory = extensionDirectory.CreateSubdirectory("UI");
+        await File.WriteAllBytesAsync(
+            Path.Combine(differentlyCasedDirectory.FullName, "icon.bin"),
+            [0x01, 0x02, 0x03],
+            TestContext.Current.CancellationToken);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Extension]));
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations none --skills none --extension-locations project --extensions aspire-doctor");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.Equal(
+            [
+                "extension.mjs",
+                Path.Combine("ui", "icon.bin"),
+            ],
+            Directory.EnumerateFiles(extensionDirectory.FullName, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(extensionDirectory.FullName, path))
+                .Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task PromptAndChainAsync_UnavailableExtensionBundleDoesNotBlockSkillInstallation()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var interactionService = new TestInteractionService();
+        interactionService.PromptForSelectionsCallback = (_, choices, _, _) =>
+        {
+            var materializedChoices = choices.Cast<object>().ToList();
+            Assert.NotEmpty(materializedChoices);
+            return materializedChoices
+                .Where(choice => choice switch
+                {
+                    AgentAssetLocation location => location == AgentAssetLocation.Standard ||
+                        location == AgentAssetLocation.ProjectExtensions,
+                    AgentAssetDefinition asset => asset.HasName(CommonAgentApplicators.AspireSkillName),
+                    _ => false
+                })
+                .ToList();
+        };
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ => interactionService;
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Skill]));
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<AgentInitCommand>();
+
+        var result = await command.PromptAndChainAsync(
+            interactionService,
+            CliExitCodes.Success,
+            workspace.WorkspaceRoot,
+            PromptBinding.CreateDefault(true),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            null,
+            TestContext.Current.CancellationToken).DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, result.ExitCode);
+        Assert.Empty(result.GetAssets(AgentAssetKind.Extension));
+        AssertSkillFileExists(
+            workspace.WorkspaceRoot,
+            Path.Combine(".agents", "skills"),
+            CommonAgentApplicators.AspireSkillName);
+    }
+
+    [Fact]
+    public async Task AgentInitCommand_ExtensionOptionsInstallUserExtensionUnderHomeDirectory()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var homeDirectory = workspace.CreateDirectory("fake-home");
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.CliExecutionContextFactory = _ => CreateExecutionContext(workspace.WorkspaceRoot, homeDirectory);
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Extension]));
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations none --skills none --extension-locations user --extensions aspire-doctor");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        var extensionPath = Path.Combine(
+            homeDirectory.FullName,
+            ".copilot",
+            "extensions",
+            "aspire-doctor",
+            "extension.mjs");
+        Assert.True(File.Exists(extensionPath), $"Expected extension at {extensionPath}");
+    }
+
+    [Fact]
+    public async Task AgentInitCommand_ExtensionOptionsInstallUserExtensionUnderCopilotHome()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var homeDirectory = workspace.CreateDirectory("fake-home");
+        var copilotHomeDirectory = workspace.CreateDirectory("copilot-home");
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.CliExecutionContextFactory = _ => CreateExecutionContext(workspace.WorkspaceRoot, homeDirectory);
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Extension]));
+        });
+        services.AddSingleton<IEnvironment>(new TestEnvironment(new Dictionary<string, string?>
+        {
+            ["COPILOT_HOME"] = copilotHomeDirectory.FullName,
+        }));
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations none --skills none --extension-locations user --extensions aspire-doctor");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        var extensionPath = Path.Combine(
+            copilotHomeDirectory.FullName,
+            "extensions",
+            "aspire-doctor",
+            "extension.mjs");
+        Assert.True(File.Exists(extensionPath), $"Expected extension at {extensionPath}");
+    }
+
+    [Theory]
+    [InlineData("--extensions all")]
+    [InlineData("--extension-locations project")]
+    public async Task AgentInitCommand_ExplicitExtensionRequestFailsWhenBundleResolutionFails(string extensionOptions)
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        const string installFailureMessage = "Aspire Extensions bundle is unavailable.";
+        var interactionService = new TestInteractionService();
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = _ => interactionService;
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                AspireSkillsInstallResult.Failed(installFailureMessage),
+                resultAssetKind: AgentAssetKind.Extension);
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            $"--skill-locations none --skills none {extensionOptions}");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.InvalidCommand, exitCode);
+        Assert.Contains(installFailureMessage, interactionService.DisplayedErrors);
+        Assert.Contains(
+            interactionService.DisplayedMessages,
+            message => message.Emoji.Equals(KnownEmojis.Warning) &&
+                message.Message == AgentCommandStrings.ConfigurationCompletedWithErrors);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [SkipOnPlatform(TestPlatforms.Windows, "Creating symbolic links on Windows requires elevated privileges or Developer Mode.")]
+    public async Task AgentInitCommand_DoesNotFollowDestinationReparsePoints(bool linkDirectory)
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var outsideDirectory = workspace.CreateDirectory("outside");
+        var extensionBaseDirectory = Path.Combine(workspace.WorkspaceRoot.FullName, ".github", "extensions");
+        string? outsideFile = null;
+        if (linkDirectory)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(extensionBaseDirectory)!);
+            Directory.CreateSymbolicLink(extensionBaseDirectory, outsideDirectory.FullName);
+        }
+        else
+        {
+            var extensionDirectory = Directory.CreateDirectory(Path.Combine(extensionBaseDirectory, "aspire-doctor"));
+            outsideFile = Path.Combine(outsideDirectory.FullName, "outside.mjs");
+            await File.WriteAllTextAsync(outsideFile, "outside", TestContext.Current.CancellationToken);
+            File.CreateSymbolicLink(Path.Combine(extensionDirectory.FullName, "extension.mjs"), outsideFile);
+        }
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Extension]));
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations none --skills none --extension-locations project --extensions aspire-doctor");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.InvalidCommand, exitCode);
+        if (outsideFile is not null)
+        {
+            Assert.Equal("outside", await File.ReadAllTextAsync(outsideFile, TestContext.Current.CancellationToken));
+        }
+        else
+        {
+            Assert.Empty(outsideDirectory.EnumerateFileSystemInfos());
+        }
+    }
+
+    [Theory]
+    [InlineData(FileShare.None)]
+    [InlineData(FileShare.Read)]
+    [SkipOnPlatform(TestPlatforms.Linux | TestPlatforms.OSX | TestPlatforms.FreeBSD, "Windows file sharing semantics are required.")]
+    public async Task AgentInitCommand_DoesNotPartiallyUpdateAssetWhenFileOperationFails(FileShare fileShare)
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var extensionDirectory = workspace.CreateDirectory(Path.Combine(".github", "extensions", "aspire-doctor"));
+        var extensionPath = Path.Combine(extensionDirectory.FullName, "extension.mjs");
+        var binaryDirectory = extensionDirectory.CreateSubdirectory("ui");
+        var binaryPath = Path.Combine(binaryDirectory.FullName, "icon.bin");
+        await File.WriteAllTextAsync(extensionPath, "original extension", TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(binaryPath, [0x01, 0x02, 0x03], TestContext.Current.CancellationToken);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.AspireSkillsInstallerFactory = serviceProvider => new FakeAspireSkillsInstaller(
+                serviceProvider.GetRequiredService<CliExecutionContext>(),
+                result: null,
+                supportedAssetKinds: new HashSet<AgentAssetKind>([AgentAssetKind.Extension]));
+        });
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations none --skills none --extension-locations project --extensions aspire-doctor");
+
+        int exitCode;
+        // FileShare.None fails while staging the second file. FileShare.Read permits staging but
+        // prevents the later rename, exercising rollback after the first file was published.
+        await using (File.Open(binaryPath, FileMode.Open, FileAccess.Read, fileShare))
+        {
+            exitCode = await result.InvokeAsync().DefaultTimeout();
+        }
+
+        Assert.Equal(CliExitCodes.InvalidCommand, exitCode);
+        Assert.Equal("original extension", await File.ReadAllTextAsync(extensionPath, TestContext.Current.CancellationToken));
+        var binaryContent = await File.ReadAllBytesAsync(binaryPath, TestContext.Current.CancellationToken);
+        Assert.Equal<byte>([0x01, 0x02, 0x03], binaryContent);
+    }
+
+    [Theory]
+    [InlineData("agent init --extensions none --extension-locations none")]
+    [InlineData("init --extensions none --extension-locations none")]
+    [InlineData("new --extensions none --extension-locations none")]
+    public void ExtensionOptions_AreAvailableOnAgentInitInitAndNew(string commandLine)
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+
+        var result = command.Parse(commandLine);
+
+        Assert.Empty(result.Errors);
+        Assert.Equal("none", result.GetValue(AgentInitCommand.s_extensionsOption));
+        Assert.Equal("none", result.GetValue(AgentInitCommand.s_extensionLocationsOption));
+    }
+
+    [Theory]
+    [InlineData("--skill-locations project --skills aspire --extension-locations none --extensions none")]
+    [InlineData("--skill-locations none --skills none --extension-locations standard --extensions aspire-doctor")]
+    public async Task AgentInitCommand_DoesNotAcceptTargetsFromAnotherAssetKind(string options)
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse($"agent init --workspace-root {workspace.WorkspaceRoot.FullName} {options}");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.MissingRequiredArgument, exitCode);
+    }
+
+    [Fact]
+    public async Task AgentInitCommand_SkillsOnlySelectionRemainsIndependentFromExtensions()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+        var command = provider.GetRequiredService<RootCommand>();
+        var result = command.Parse(
+            $"agent init --workspace-root {workspace.WorkspaceRoot.FullName} " +
+            "--skill-locations standard --skills aspire --extension-locations none --extensions none");
+
+        var exitCode = await result.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        AssertSkillFileExists(
+            workspace.WorkspaceRoot,
+            Path.Combine(".agents", "skills"),
+            CommonAgentApplicators.AspireSkillName);
+        Assert.False(Directory.Exists(Path.Combine(workspace.WorkspaceRoot.FullName, ".github", "extensions")));
+    }
+
+    [Fact]
     public async Task AgentInitCommand_SummarizesDefaultSkillsOnce()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
@@ -88,7 +653,10 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
                 AgentCommandStrings.InitCommand_InstalledSkillsSummarySkills,
                 $"{CommonAgentApplicators.AspireSkillName}, {CommonAgentApplicators.AspireDeploymentSkillName}, {FakeAspireSkillsInstaller.AspireInitSkillName}, {FakeAspireSkillsInstaller.AspireMonitoringSkillName}, {FakeAspireSkillsInstaller.AspireOrchestrationSkillName}")}",
             $"  {string.Format(CultureInfo.CurrentCulture, AgentCommandStrings.InitCommand_InstalledSkillsSummaryLocations, ".agents/skills, ~/.agents/skills")}");
-        var message = Assert.Single(interactionService.DisplayedMessages, displayedMessage => displayedMessage.Emoji.Equals(KnownEmojis.Robot));
+        var message = Assert.Single(
+            interactionService.DisplayedMessages,
+            displayedMessage => displayedMessage.Emoji.Equals(KnownEmojis.Robot) &&
+                displayedMessage.Message.StartsWith(AgentCommandStrings.InitCommand_InstalledSkillsSummary, StringComparison.Ordinal));
         Assert.Equal(expectedSummary, message.Message);
         Assert.DoesNotContain(
             interactionService.DisplayedMessages,
@@ -107,8 +675,8 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         interactionService.PromptForSelectionsCallback = (_, choices, _, _) => choices.Cast<object>()
             .Where(choice => choice switch
             {
-                SkillLocation location => location == SkillLocation.Standard,
-                SkillDefinition skill => skill.HasName(CommonAgentApplicators.AspireSkillName),
+                AgentAssetLocation location => location == AgentAssetLocation.Standard,
+                AgentAssetDefinition asset => asset.HasName(CommonAgentApplicators.AspireSkillName),
                 _ => false
             })
             .ToList();
@@ -184,12 +752,12 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         interactionService.PromptForSelectionsCallback = (_, choices, _, _) =>
         {
             var items = choices.Cast<object>().ToList();
-            if (items.FirstOrDefault() is SkillLocation)
+            if (items.FirstOrDefault() is AgentAssetLocation location)
             {
-                return [SkillLocation.Standard];
+                return location.AssetKind is AgentAssetKind.Skill ? [AgentAssetLocation.Standard] : [];
             }
 
-            promptedSkillNames.AddRange(items.OfType<SkillDefinition>().Select(static skill => skill.Name));
+            promptedSkillNames.AddRange(items.OfType<AgentAssetDefinition>().Select(static skill => skill.Name));
             return [];
         };
 
@@ -226,12 +794,12 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         interactionService.PromptForSelectionsCallback = (_, choices, formatter, _) =>
         {
             var items = choices.Cast<object>().ToList();
-            if (items.FirstOrDefault() is SkillLocation)
+            if (items.FirstOrDefault() is AgentAssetLocation location)
             {
-                return [SkillLocation.Standard];
+                return location.AssetKind is AgentAssetKind.Skill ? [AgentAssetLocation.Standard] : [];
             }
 
-            var skill = Assert.Single(items.OfType<SkillDefinition>(), static skill => skill.HasName(FakeAspireSkillsInstaller.AspireMonitoringSkillName));
+            var skill = Assert.Single(items.OfType<AgentAssetDefinition>(), static skill => skill.HasName(FakeAspireSkillsInstaller.AspireMonitoringSkillName));
             formattedSkill = formatter(skill);
             return [];
         };
@@ -290,12 +858,12 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         interactionService.PromptForSelectionsCallback = (_, choices, formatter, _) =>
         {
             var items = choices.Cast<object>().ToList();
-            if (items.FirstOrDefault() is SkillLocation)
+            if (items.FirstOrDefault() is AgentAssetLocation location)
             {
-                return [SkillLocation.Standard];
+                return location.AssetKind is AgentAssetKind.Skill ? [AgentAssetLocation.Standard] : [];
             }
 
-            var skill = Assert.Single(items.OfType<SkillDefinition>(), static skill => skill.HasName(FakeAspireSkillsInstaller.AspireMonitoringSkillName));
+            var skill = Assert.Single(items.OfType<AgentAssetDefinition>(), static skill => skill.HasName(FakeAspireSkillsInstaller.AspireMonitoringSkillName));
             formattedSkill = formatter(skill);
             return [];
         };
@@ -338,12 +906,12 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         interactionService.PromptForSelectionsCallback = (_, choices, _, _) =>
         {
             var items = choices.Cast<object>().ToList();
-            if (items.FirstOrDefault() is SkillLocation)
+            if (items.FirstOrDefault() is AgentAssetLocation location)
             {
-                return [SkillLocation.Standard];
+                return location.AssetKind is AgentAssetKind.Skill ? [AgentAssetLocation.Standard] : [];
             }
 
-            promptedSkillNames.AddRange(items.OfType<SkillDefinition>().Select(static skill => skill.Name));
+            promptedSkillNames.AddRange(items.OfType<AgentAssetDefinition>().Select(static skill => skill.Name));
             return [];
         };
 
@@ -391,7 +959,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
     public async Task AgentInitCommand_NonInteractive_WithCliDefinedSkillDifferentCasing_DoesNotResolveBundle()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
-        const string installFailureMessage = "Aspire skills bundle is unavailable.";
+        const string installFailureMessage = "Aspire Skills bundle is unavailable.";
         var interactionService = new TestInteractionService();
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
@@ -421,19 +989,19 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         var bundle = await CreateBundleAsync(
             workspace.WorkspaceRoot,
             (CommonAgentApplicators.AspireSkillName, "Aspire CLI commands and workflows for distributed apps"),
-            (SkillDefinition.PlaywrightCli.Name, "Bundle-provided Playwright collision"));
-        var promptedSkills = new List<SkillDefinition>();
+            (AgentAssetDefinition.PlaywrightCli.Name, "Bundle-provided Playwright collision"));
+        var promptedSkills = new List<AgentAssetDefinition>();
         var interactionService = new TestInteractionService();
         interactionService.SetupStringPromptResponse(workspace.WorkspaceRoot.FullName);
         interactionService.PromptForSelectionsCallback = (_, choices, _, _) =>
         {
             var items = choices.Cast<object>().ToList();
-            if (items.FirstOrDefault() is SkillLocation)
+            if (items.FirstOrDefault() is AgentAssetLocation location)
             {
-                return [SkillLocation.Standard];
+                return location.AssetKind is AgentAssetKind.Skill ? [AgentAssetLocation.Standard] : [];
             }
 
-            promptedSkills.AddRange(items.OfType<SkillDefinition>());
+            promptedSkills.AddRange(items.OfType<AgentAssetDefinition>());
             return [];
         };
 
@@ -452,8 +1020,8 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
         Assert.Equal(CliExitCodes.Success, exitCode);
-        var playwrightSkill = Assert.Single(promptedSkills, static skill => skill.HasName(SkillDefinition.PlaywrightCli.Name, StringComparison.OrdinalIgnoreCase));
-        Assert.Same(SkillDefinition.PlaywrightCli, playwrightSkill);
+        var playwrightSkill = Assert.Single(promptedSkills, static skill => skill.HasName(AgentAssetDefinition.PlaywrightCli.Name, StringComparison.OrdinalIgnoreCase));
+        Assert.Same(AgentAssetDefinition.PlaywrightCli, playwrightSkill);
     }
 
     [Fact]
@@ -505,8 +1073,8 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
 
         var exitCode = await result.InvokeAsync().DefaultTimeout();
 
-        // Default Aspire skills are installed (all bundle skills except the one-time setup skill).
-        // Aspireify is filtered out by ExcludeOneTimeSetupSkillsFromDefaults; Playwright is
+        // Default Aspire skills are installed (all bundle skills except the one-time setup asset).
+        // Aspireify is filtered out by ExcludeOneTimeSetupAssetsFromDefaults; Playwright is
         // a CLI-defined skill that is not default.
         Assert.Equal(CliExitCodes.Success, exitCode);
 
@@ -539,9 +1107,11 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         // installer's InstallAsync is idempotent, so the subsequent CLI invocation will reuse
         // this same bundle directory.
         var installer = provider.GetRequiredService<IAspireSkillsInstaller>();
-        var installResult = await installer.InstallAsync(TestContext.Current.CancellationToken).DefaultTimeout();
+        var installResult = await installer.InstallAsync(
+            AgentAssetKind.Skill,
+            TestContext.Current.CancellationToken).DefaultTimeout();
         Assert.NotNull(installResult.Bundle);
-        var bundleSkillNames = installResult.Bundle.GetSkillDefinitions().Select(static s => s.Name).ToList();
+        var bundleSkillNames = installResult.Bundle.GetAssetDefinitions().Select(static asset => asset.Name).ToList();
         Assert.NotEmpty(bundleSkillNames);
 
         // Explicit names instead of `all` keeps the assertion focused on bundle skills and
@@ -626,7 +1196,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
     public async Task AgentInitCommand_NonInteractive_WithUnavailableAspireSkillsBundle_SucceedsWithoutWarningOrSelectedAspireSkills()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
-        const string installFailureMessage = "Aspire skills bundle is unavailable.";
+        const string installFailureMessage = "Aspire Skills bundle is unavailable.";
         var interactionService = new TestInteractionService();
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
@@ -655,7 +1225,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
     public async Task PromptAndChainAsync_WithUnavailableAspireSkillsBundle_SucceedsWithoutWarningOrSelectedAspireSkills()
     {
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
-        const string installFailureMessage = "Aspire skills bundle is unavailable.";
+        const string installFailureMessage = "Aspire Skills bundle is unavailable.";
         var interactionService = new TestInteractionService();
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
@@ -676,11 +1246,15 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
             PromptBinding.CreateDefault(true),
             PromptBinding.CreateDefault<string?>(null),
             PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
             null,
             CancellationToken.None).DefaultTimeout();
 
         Assert.Equal(CliExitCodes.Success, result.ExitCode);
-        Assert.DoesNotContain(result.SelectedSkills, static skill => skill.SourceKind is SkillSourceKind.AspireSkillsBundle);
+        Assert.DoesNotContain(
+            result.GetAssets(AgentAssetKind.Skill),
+            static skill => skill.SourceKind is AgentAssetSourceKind.AspireSkillsBundle);
         Assert.DoesNotContain(
             interactionService.DisplayedMessages,
             message => message.Emoji.Equals(KnownEmojis.Warning) && message.Message == installFailureMessage);
@@ -710,11 +1284,15 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
             PromptBinding.CreateDefault(true),
             PromptBinding.CreateDefault<string?>(null),
             PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
             null,
             CancellationToken.None).DefaultTimeout();
 
         Assert.Equal(CliExitCodes.Success, result.ExitCode);
-        Assert.Contains(result.SelectedSkills, static skill => skill.HasName(CommonAgentApplicators.AspireifySkillName));
+        Assert.Contains(
+            result.GetAssets(AgentAssetKind.Skill),
+            static skill => skill.HasName(CommonAgentApplicators.AspireifySkillName));
         AssertSkillFileExists(workspace.WorkspaceRoot, Path.Combine(".agents", "skills"), CommonAgentApplicators.AspireifySkillName);
     }
 
@@ -733,8 +1311,8 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         var command = provider.GetRequiredService<AgentInitCommand>();
 
         // Callers that just created a new AppHost (aspire new) or are running standalone agent
-        // init pass a predicate that strips aspireify from the default selection. The skill
-        // remains in the prompt — it's just not pre-checked.
+        // init pass a predicate that strips aspireify from every asset-kind default selection.
+        // The assets remain in their prompts — they are just not pre-checked.
         var result = await command.PromptAndChainAsync(
             interactionService,
             CliExitCodes.Success,
@@ -742,13 +1320,31 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
             PromptBinding.CreateDefault(true),
             PromptBinding.CreateDefault<string?>(null),
             PromptBinding.CreateDefault<string?>(null),
-            AgentInitCommand.ExcludeOneTimeSetupSkillsFromDefaults,
+            PromptBinding.CreateDefault<string?>(null),
+            PromptBinding.CreateDefault<string?>(null),
+            AgentInitCommand.ExcludeOneTimeSetupAssetsFromDefaults,
             CancellationToken.None).DefaultTimeout();
 
         Assert.Equal(CliExitCodes.Success, result.ExitCode);
-        Assert.DoesNotContain(result.SelectedSkills, static skill => skill.HasName(CommonAgentApplicators.AspireifySkillName));
+        Assert.DoesNotContain(
+            result.GetAssets(AgentAssetKind.Skill),
+            static skill => skill.HasName(CommonAgentApplicators.AspireifySkillName));
         var aspireifySkillPath = Path.Combine(workspace.WorkspaceRoot.FullName, ".agents", "skills", CommonAgentApplicators.AspireifySkillName);
         Assert.False(Directory.Exists(aspireifySkillPath), $"Expected no aspireify skill directory but found {aspireifySkillPath}");
+    }
+
+    [Fact]
+    public void ExcludeOneTimeSetupAssetsFromDefaults_ExcludesAspireifyAcrossAssetKinds()
+    {
+        foreach (var assetKind in Enum.GetValues<AgentAssetKind>())
+        {
+            var aspireify = AgentAssetDefinition.CreateAspireSkillsBundleAsset(
+                assetKind,
+                CommonAgentApplicators.AspireifySkillName,
+                "One-time Aspire workspace setup");
+
+            Assert.False(AgentInitCommand.ExcludeOneTimeSetupAssetsFromDefaults(aspireify));
+        }
     }
 
     [Fact]
@@ -841,7 +1437,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         var bundleDirectory = new DirectoryInfo(Path.Combine(workspaceRoot.FullName, $".test-aspire-skills-bundle-{Guid.NewGuid():N}"));
         Directory.CreateDirectory(bundleDirectory.FullName);
 
-        var manifestSkills = new List<SkillBundleSkill>();
+        var manifestSkills = new List<SkillBundleAsset>();
         foreach (var (name, description) in skills)
         {
             var skillDirectory = Path.Combine(bundleDirectory.FullName, "skills", name);
@@ -856,7 +1452,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
                 # {{name}}
                 """);
 
-            manifestSkills.Add(new SkillBundleSkill
+            manifestSkills.Add(new SkillBundleAsset
             {
                 Name = name,
                 Description = description,
@@ -879,15 +1475,14 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
                 AspireCli = ">=0.0.0 <999.0.0",
                 AspireSdk = ">=0.0.0 <999.0.0"
             },
-            Skills = [.. manifestSkills]
+            Assets = [.. manifestSkills]
         };
 
-        var manifestJson = JsonSerializer.Serialize(manifest, AspireSkillsJsonSerializerContext.Default.SkillBundleManifest);
+        var provider = new SkillBundleProvider();
+        var manifestJson = JsonSerializer.Serialize(manifest, provider.CreateManifestTypeInfo());
         var manifestPath = Path.Combine(bundleDirectory.FullName, "skill-manifest.json");
         await File.WriteAllTextAsync(manifestPath, manifestJson);
-        return await new AspireSkillsBundleProvider().LoadAsync(
-            bundleDirectory,
-            CancellationToken.None);
+        return await provider.LoadAsync(bundleDirectory, CancellationToken.None);
     }
 
     private static string ComputeSha512(string path)
@@ -904,7 +1499,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
             options.CliExecutionContextFactory = _ => CreateExecutionContext(workspace.WorkspaceRoot, homeDirectory);
-            options.AgentEnvironmentDetectorFactory = _ => new FakeDetectingDetector(AgentClientKind.CopilotCli);
+            options.AgentEnvironmentDetectorFactory = _ => new FakeDetectingDetector(AgentClient.CopilotCli);
         });
 
         using var provider = services.BuildServiceProvider();
@@ -933,7 +1528,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
             options.CliExecutionContextFactory = _ => CreateExecutionContext(workspace.WorkspaceRoot, homeDirectory);
-            options.AgentEnvironmentDetectorFactory = _ => new FakeDetectingDetector(AgentClientKind.CopilotCli);
+            options.AgentEnvironmentDetectorFactory = _ => new FakeDetectingDetector(AgentClient.CopilotCli);
             options.InteractionServiceFactory = _ => interactionService;
             options.TelemetryHookConfiguratorFactory = _ => new ThrowingTelemetryHookConfigurator(failureMessage);
         });
@@ -959,7 +1554,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
     /// A detector that marks a single client as detected without contributing applicators, so the
     /// telemetry hook wiring in <c>agent init</c> can be exercised without real client installations.
     /// </summary>
-    private sealed class FakeDetectingDetector(AgentClientKind client) : IAgentEnvironmentDetector
+    private sealed class FakeDetectingDetector(AgentClient client) : IAgentEnvironmentDetector
     {
         public Task<AgentEnvironmentApplicator[]> DetectAsync(AgentEnvironmentScanContext context, CancellationToken cancellationToken)
         {
@@ -976,7 +1571,7 @@ public class AgentInitCommandTests(ITestOutputHelper outputHelper)
     private sealed class ThrowingTelemetryHookConfigurator(string message) : ITelemetryHookConfigurator
     {
         public Task<TelemetryHookConfigurationResult> ConfigureAsync(
-            IReadOnlyCollection<AgentClientKind> detectedClients,
+            IReadOnlyCollection<AgentClient> detectedClients,
             CancellationToken cancellationToken)
             => throw new InvalidOperationException(message);
     }

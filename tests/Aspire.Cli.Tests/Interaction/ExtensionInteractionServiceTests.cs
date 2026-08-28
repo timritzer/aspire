@@ -207,6 +207,23 @@ public class ExtensionInteractionServiceTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task PromptForSelectionsAsync_ForwardsPreSelectedItemsToExtension()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var backchannel = new TestExtensionBackchannel();
+        using var interactionService = CreateExtensionInteractionService(workspace, backchannel);
+
+        var result = await interactionService.PromptForSelectionsAsync(
+            "Select items",
+            ["first", "second", "third"],
+            static choice => choice,
+            preSelected: ["second", "third"]);
+
+        Assert.Equal(["first", "second", "third"], result);
+        Assert.Equal(["second", "third"], backchannel.PromptForSelectionsPreSelected);
+    }
+
+    [Fact]
     public async Task Dispose_StopsBackgroundPump()
     {
         var output = new StringBuilder();

@@ -172,6 +172,29 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task InitCommand_ExplicitExtensionOptionsInstallProjectExtension()
+    {
+        using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+        var parseResult = initCommand.Parse(
+            "init --skill-locations none --skills none " +
+            "--extension-locations project --extensions aspire-doctor");
+
+        var exitCode = await parseResult.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        var extensionPath = Path.Combine(
+            workspace.WorkspaceRoot.FullName,
+            ".github",
+            "extensions",
+            "aspire-doctor",
+            "extension.mjs");
+        Assert.True(File.Exists(extensionPath), $"Expected extension at {extensionPath}");
+    }
+
+    [Fact]
     public async Task InitCommand_SingleFileSkeleton_CreatesAppHostRunJsonWithDashboardEnvVars()
     {
         // Regression for https://github.com/microsoft/aspire/issues/15986: without
@@ -493,13 +516,14 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         {
             var items = choices.Cast<object>().ToList();
 
-            if (items.FirstOrDefault() is SkillLocation)
+            if (items.FirstOrDefault() is AgentAssetLocation)
             {
-                return [SkillLocation.Standard, SkillLocation.ClaudeCode, SkillLocation.OpenCode];
+                return [AgentAssetLocation.Standard, AgentAssetLocation.ClaudeCode, AgentAssetLocation.OpenCode];
             }
 
             return items
-                .OfType<SkillDefinition>()
+                .OfType<AgentAssetDefinition>()
+                .Where(static asset => asset.AssetKind is AgentAssetKind.Skill)
                 .Where(static skill => skill.HasName(CommonAgentApplicators.AspireifySkillName))
                 .Cast<object>()
                 .ToList();
@@ -541,13 +565,14 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         {
             var items = choices.Cast<object>().ToList();
 
-            if (items.FirstOrDefault() is SkillLocation)
+            if (items.FirstOrDefault() is AgentAssetLocation)
             {
-                return [SkillLocation.Standard];
+                return [AgentAssetLocation.Standard];
             }
 
             return items
-                .OfType<SkillDefinition>()
+                .OfType<AgentAssetDefinition>()
+                .Where(static asset => asset.AssetKind is AgentAssetKind.Skill)
                 .Where(static skill => skill.HasName(CommonAgentApplicators.AspireSkillName))
                 .Cast<object>()
                 .ToList();
