@@ -16,9 +16,6 @@ public partial class NotificationEntryComponent : ComponentBase
     [Parameter]
     public EventCallback OnDismiss { get; set; }
 
-    [CascadingParameter]
-    public IDialogInstance Dialog { get; set; } = default!;
-
     [Inject]
     public required IServiceProvider Services { get; init; }
 
@@ -55,14 +52,7 @@ public partial class NotificationEntryComponent : ComponentBase
     {
         if (Entry.PrimaryAction is { } primaryAction)
         {
-            try
-            {
-                await Dialog.CloseAsync();
-                await primaryAction.OnClick(Services);
-            }
-            finally
-            {
-            }
+            await primaryAction.OnClick(Services);
         }
     }
 }

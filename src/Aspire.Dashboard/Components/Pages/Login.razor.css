@@ -80,7 +80,7 @@
     margin: var(--spacingHorizontalS);
 }
 
-.token-help-container fluent-anchor {
+.token-help-container a {
     width: fit-content;
 }
 

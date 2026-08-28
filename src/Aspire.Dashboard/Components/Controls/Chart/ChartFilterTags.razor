@@ -9,6 +9,7 @@
         @{
             var i = 0;
         }
+        @* TODO: Filter the values before rendering if metric dimension cardinality becomes large enough to cause performance problems. *@
         @foreach (var item in orderedValues)
         {
             var isIncludedInFilters = Filter.SelectedValues.Contains(item);

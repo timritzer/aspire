@@ -42,4 +42,20 @@ public class AspirePropertyDetailsAccordionItemTests : DashboardTestContext
             marker => Assert.Equal("marker-collapsed", marker.GetAttribute("slot")));
         Assert.Equal("Content", cut.Find(".section-content").TextContent);
     }
+
+    [Fact]
+    public async Task Expanded_UserChangeSurvivesParentRerender()
+    {
+        FluentUISetupHelpers.SetupFluentUIComponents(this);
+
+        var cut = RenderComponent<AspirePropertyDetailsAccordionItem>(builder => builder
+            .Add(component => component.Header, "Properties")
+            .Add(component => component.Expanded, true)
+            .AddChildContent("Content"));
+
+        await cut.InvokeAsync(() => cut.FindComponent<FluentAccordionItem>().Instance.ExpandedChanged.InvokeAsync(false));
+        cut.Render();
+
+        Assert.False(cut.FindComponent<FluentAccordionItem>().Instance.Expanded);
+    }
 }

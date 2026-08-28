@@ -137,9 +137,7 @@ public partial class TextVisualizerDialog : ComponentBase
         {
             Title = options.ValueDescription,
             Width = $"min(1000px, {width})",
-            TrapFocus = true,
             Modal = true,
-            PreventScroll = true,
         };
 
         return await options.DialogService.ShowDialogAsync<TextVisualizerDialog>(

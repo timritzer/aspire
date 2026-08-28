@@ -395,9 +395,7 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
         {
             Title = title,
             Width = $"min(1000px, {width})",
-            TrapFocus = true,
             Modal = true,
-            PreventScroll = true,
         };
 
         var spanDetailsViewModel = SpanDetailsViewModel.Create(span, telemetryRepository, resources);

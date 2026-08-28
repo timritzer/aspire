@@ -24,6 +24,7 @@
         </div>
         @if (!string.IsNullOrEmpty(Content.LinkText) && !string.IsNullOrEmpty(Content.LinkUrl))
         {
+            @* Message bar links are specified by application code, so they don't need automatic URL sanitization. *@
             <a href="@Content.LinkUrl" target="_blank" rel="noreferrer noopener">@Content.LinkText</a>
         }
     </div>

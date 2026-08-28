@@ -26,10 +26,6 @@ public sealed class DialogParameters
 
     public bool PreventDismissOnOverlayClick { get; set; }
 
-    public bool TrapFocus { get; set; }
-
-    public bool PreventScroll { get; set; }
-
     public bool Modal { get; set; } = true;
 
     public HorizontalAlignment Alignment { get; set; } = HorizontalAlignment.Center;

@@ -16,6 +16,7 @@ else if (DisplayedUrls.Count > 1)
     <div class="url-container" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true">
         <FluentOverflow Class="url-overflow" MaxRenderedItems="@MaxRenderedOverflowItems">
             <ChildContent>
+                @* TODO: Filter the URLs before rendering if resource URL cardinality becomes large enough to cause performance problems. *@
                 @for (var i = 0; i < DisplayedUrls.Count; i++)
                 {
                     var displayedUrl = DisplayedUrls[i];
