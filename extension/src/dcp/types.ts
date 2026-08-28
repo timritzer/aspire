@@ -25,6 +25,7 @@ export interface ProjectLaunchConfiguration extends ExecutableLaunchConfiguratio
     disable_launch_profile?: boolean;
     project_path: string;
     build_configuration?: string;
+    build_environment_variable_names?: string[];
     suppress_build?: boolean;
 }
 

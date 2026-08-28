@@ -44,8 +44,8 @@ class TestDotNetService {
         this._hasDevKit = hasDevKit;
     }
 
-    getDotNetTargetPath(projectFile: string, buildConfiguration?: string): Promise<string> {
-        return this.getDotNetTargetPathStub(projectFile, buildConfiguration);
+    getDotNetTargetPath(projectFile: string, buildConfiguration?: string, environment?: NodeJS.ProcessEnv): Promise<string> {
+        return this.getDotNetTargetPathStub(projectFile, buildConfiguration, environment);
     }
 
     buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void> {
@@ -669,6 +669,7 @@ suite('Dotnet Debugger Extension Tests', () => {
             type: 'project',
             project_path: projectPath,
             build_configuration: 'Release',
+            build_environment_variable_names: ['BUILD_FLAVOR'],
             suppress_build: true
         };
         const debugConfig: AspireResourceExtendedDebugConfiguration = {
@@ -683,11 +684,17 @@ suite('Dotnet Debugger Extension Tests', () => {
         await extension.createDebugSessionConfigurationCallback!(
             launchConfig,
             [],
-            [],
+            [
+                { name: 'BUILD_FLAVOR', value: 'custom' },
+                { name: 'RUNTIME_ONLY', value: 'not-for-msbuild' }
+            ],
             { debug: true, forceBuild: true, runId: '1', debugSessionId: '1', isApphost: false, debugSession: fakeAspireDebugSession },
             debugConfig);
 
-        assert.ok(dotNetService.getDotNetTargetPathStub.calledOnceWith(projectPath, 'Release'));
+        assert.ok(dotNetService.getDotNetTargetPathStub.calledOnceWith(
+            projectPath,
+            'Release',
+            { BUILD_FLAVOR: 'custom' }));
         assert.ok(dotNetService.buildDotNetProjectStub.notCalled);
         assert.strictEqual(debugConfig.program, outputPath);
     });

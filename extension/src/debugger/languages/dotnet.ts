@@ -36,7 +36,7 @@ import { getAppHostLaunchProfileOptions } from '../../utils/launchProfile';
 interface IDotNetService {
     getAndActivateDevKit(): Promise<boolean>
     buildDotNetProject(projectFile: string, buildConfiguration?: string): Promise<void>;
-    getDotNetTargetPath(projectFile: string, buildConfiguration?: string): Promise<string>;
+    getDotNetTargetPath(projectFile: string, buildConfiguration?: string, environment?: NodeJS.ProcessEnv): Promise<string>;
     getDotNetRunApiOutput(projectFile: string, environment?: NodeJS.ProcessEnv): Promise<string>;
     getDotNetFileAppRunProperties(projectFile: string, buildConfiguration: string, environment?: NodeJS.ProcessEnv): Promise<DotNetFileAppRunProperties>;
 }
@@ -132,7 +132,7 @@ export class DotNetService implements IDotNetService {
         });
     }
 
-    async getDotNetTargetPath(projectFile: string, buildConfiguration?: string): Promise<string> {
+    async getDotNetTargetPath(projectFile: string, buildConfiguration?: string, environment?: NodeJS.ProcessEnv): Promise<string> {
         const args = [
             'msbuild',
             projectFile,
@@ -147,10 +147,14 @@ export class DotNetService implements IDotNetService {
 
         try {
             const { cliPath } = await resolveCliPath(getCliPathTargetForUri(vscode.Uri.file(projectFile)));
+            const processEnvironment = createResolvedAspireCliPathProcessEnvironment(cliPath);
+            if (environment) {
+                Object.assign(processEnvironment, environment);
+            }
             const { stdout } = await this.execFileAsync('dotnet', args, {
                 cwd: path.dirname(projectFile),
                 encoding: 'utf8',
-                env: createResolvedAspireCliPathProcessEnvironment(cliPath)
+                env: processEnvironment
             });
             const output = stdout.trim();
             if (!output) {
@@ -825,6 +829,25 @@ function getEnvironmentVariable(environment: NodeJS.ProcessEnv, name: string): s
     return matchingName ? environment[matchingName] : undefined;
 }
 
+function getBuildEnvironment(
+    environment: EnvVar[],
+    variableNames: string[] | undefined): NodeJS.ProcessEnv | undefined {
+    if (!variableNames?.length) {
+        return undefined;
+    }
+
+    const resolvedEnvironment = Object.fromEntries(environment.map(variable => [variable.name, variable.value]));
+    const buildEnvironment: NodeJS.ProcessEnv = {};
+    for (const name of variableNames) {
+        const value = getEnvironmentVariable(resolvedEnvironment, name);
+        if (value !== undefined) {
+            buildEnvironment[name] = value;
+        }
+    }
+
+    return buildEnvironment;
+}
+
 export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSession: AspireDebugSession) => IDotNetService): ResourceDebuggerExtension {
     return {
         resourceType: 'project',
@@ -994,7 +1017,8 @@ export function createProjectDebuggerExtension(dotNetServiceProducer: (debugSess
             }
             else if (!isFileBasedProject) {
                 const dotNetService: IDotNetService = dotNetServiceProducer(launchOptions.debugSession);
-                const outputPath = await dotNetService.getDotNetTargetPath(projectPath, buildConfiguration);
+                const buildEnvironment = getBuildEnvironment(env, launchConfig.build_environment_variable_names);
+                const outputPath = await dotNetService.getDotNetTargetPath(projectPath, buildConfiguration, buildEnvironment);
                 const outputExists = await doesFileExist(outputPath);
                 if (!outputExists && suppressBuild) {
                     throw new Error(prebuiltProjectOutputMissing(projectPath, outputPath));

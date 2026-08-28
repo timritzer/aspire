@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #pragma warning disable ASPIRECOMMAND001 // Required command validation APIs are experimental.
+#pragma warning disable ASPIREENVIRONMENT001 // Runtime environment callback APIs are experimental.
 #pragma warning disable ASPIREPERSISTENCE001 // Resource lifetime APIs are experimental.
 
 using Aspire.Hosting.ApplicationModel;
@@ -29,6 +30,9 @@ public class DevTunnelResourceBuilderExtensionsTests
             .WithReference(target);
         var consumer = builder.AddResource(new TestResource("consumer"))
             .WithReference(target, tunnel);
+
+        var referenceEnvironment = Assert.Single(consumer.Resource.Annotations.OfType<EnvironmentCallbackAnnotation>());
+        Assert.IsType<RuntimeEnvironmentCallbackAnnotation>(referenceEnvironment);
 
         var tunnelPort = tunnel.Resource.Ports.FirstOrDefault();
         Assert.NotNull(tunnelPort);

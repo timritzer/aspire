@@ -136,6 +136,17 @@ public sealed class ProjectLaunchConfiguration() : ExecutableLaunchConfiguration
     public string? BuildConfiguration { get; set; }
 
     /// <summary>
+    /// Gets or sets the names of resolved environment variables that affected the externally produced build.
+    /// </summary>
+    /// <remarks>
+    /// IDE launchers use these names to select the matching values from the executable environment when
+    /// evaluating build properties such as <c>TargetPath</c>. Empty means no project-specific build environment.
+    /// </remarks>
+    [JsonPropertyName("build_environment_variable_names")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[]? BuildEnvironmentVariableNames { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether the IDE should suppress building the project before launch.
     /// </summary>
     /// <remarks>

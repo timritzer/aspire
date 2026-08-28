@@ -12,6 +12,7 @@ namespace Aspire.Hosting.Dotnet;
 [DebuggerDisplay("Type = {GetType().Name,nq}, ProjectPath = {ProjectPath}")]
 internal sealed class DotnetProjectMetadata(string projectPath, string? buildConfiguration) : IProjectMetadata
 {
+    private string[] _buildEnvironmentVariableNames = [];
     private string? _resolvedProjectPath;
 
     // Resolution is deferred so construction never touches the file system; an unresolvable path is
@@ -22,6 +23,9 @@ internal sealed class DotnetProjectMetadata(string projectPath, string? buildCon
 
     public bool SuppressBuild { get; set; }
 
+    public IReadOnlyList<string> BuildEnvironmentVariableNames =>
+        Volatile.Read(ref _buildEnvironmentVariableNames);
+
     /// <summary>
     /// Uses the exact path selected by the coordinated build for subsequent process and IDE launches.
     /// </summary>
@@ -29,5 +33,14 @@ internal sealed class DotnetProjectMetadata(string projectPath, string? buildCon
     {
         ArgumentException.ThrowIfNullOrEmpty(coordinatedProjectPath);
         _resolvedProjectPath = coordinatedProjectPath;
+    }
+
+    internal void SetBuildEnvironmentVariableNames(IEnumerable<string> variableNames)
+    {
+        ArgumentNullException.ThrowIfNull(variableNames);
+
+        Volatile.Write(
+            ref _buildEnvironmentVariableNames,
+            variableNames.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
     }
 }

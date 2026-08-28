@@ -1,7 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#pragma warning disable ASPIREDOTNETPROJECT001, ASPIREENVIRONMENT001, ASPIREPIPELINES001
+#pragma warning disable ASPIREDOTNETPROJECT001, ASPIREENVIRONMENT001, ASPIREEXTENSION001, ASPIREPIPELINES001
 
 using System.Reflection;
 using Aspire.Hosting.ApplicationModel;
@@ -377,6 +377,49 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         Assert.Equal(
             [NormalizeProjectPath(apiPath), NormalizeProjectPath(workerPath)],
             buildResource.ProjectPaths);
+    }
+
+    [Fact]
+    public async Task ContextSpecificBuildEnvironmentIsSharedWithRebuilderAndIdeLaunch()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper);
+        var projectPath = CreateProject(workspace.Path, "Worker", "Worker.csproj");
+        var project = builder.AddDotnetProject("worker", projectPath, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("BUILD_FLAVOR", "custom")
+            .WithRuntimeEnvironment(context => context.EnvironmentVariables["RUNTIME_ONLY"] = "runtime");
+        await using var app = builder.Build();
+
+        await app.ExecuteBeforeStartHooksAsync(TestContext.Current.CancellationToken);
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        var buildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            buildResource,
+            serviceProvider: app.Services);
+        var rebuilder = Assert.Single(builder.Resources.OfType<ProjectRebuilderResource>());
+        var rebuildEnvironment = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            rebuilder,
+            serviceProvider: app.Services);
+        var callbackContext = LaunchConfigurationTestHelpers.CreateCallbackContext(
+            project.Resource,
+            ExecutableLaunchMode.Debug,
+            new Dictionary<string, string>
+            {
+                ["BUILD_FLAVOR"] = "custom",
+                ["RUNTIME_ONLY"] = "runtime",
+            },
+            TestContext.Current.CancellationToken);
+        var launchConfiguration = Assert.IsType<ProjectLaunchConfiguration>(
+            await project.Resource.CreateLaunchConfigurationAsync(callbackContext));
+
+        Assert.Equal(["BUILD_FLAVOR"], buildEnvironment.Keys);
+        Assert.Equal("custom", buildEnvironment["BUILD_FLAVOR"]);
+        Assert.Equal(["BUILD_FLAVOR"], rebuildEnvironment.Keys);
+        Assert.Equal("custom", rebuildEnvironment["BUILD_FLAVOR"]);
+        Assert.NotNull(launchConfiguration.BuildEnvironmentVariableNames);
+        Assert.Equal(["BUILD_FLAVOR"], launchConfiguration.BuildEnvironmentVariableNames);
     }
 
     [Fact]
@@ -874,6 +917,163 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
 
     [Fact]
     [RequiresTools(["dotnet"])]
+    public async Task MultipleBuildGroupsRunSeriallyBeforeServicesStart()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var firstProject = CreateSentinelProject(workspace.Path, "First", """
+            <Target Name="RecordFirstBuild" BeforeTargets="CoreCompile">
+              <WriteLinesToFile File="$(MSBuildProjectDirectory)/first-built.txt" Lines="built" Overwrite="true" />
+            </Target>
+            """);
+        var secondProject = CreateSentinelProject(workspace.Path, "Second", """
+            <Target Name="ValidateBuildOrder" BeforeTargets="CoreCompile">
+              <Error Condition="!Exists('$(MSBuildProjectDirectory)/../First/first-built.txt')" Text="The first build group has not completed." />
+              <Error Condition="'$(BUILD_FLAVOR)' != 'custom'" Text="The direct build environment was not applied." />
+            </Target>
+            """);
+        var firstSentinel = Path.Combine(workspace.Path, "first-ran.txt");
+        var secondSentinel = Path.Combine(workspace.Path, "second-ran.txt");
+
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper).WithResourceCleanUp(true);
+        builder.AddDotnetProject("first", firstProject, options => options.ExcludeLaunchProfile = true)
+            .WithArgs("--", firstSentinel);
+        builder.AddDotnetProject("second", secondProject, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("BUILD_FLAVOR", "custom")
+            .WithArgs("--", secondSentinel);
+        await using var app = builder.Build();
+
+        using (var startCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            await app.StartAsync(startCts.Token);
+        }
+
+        using (var completionCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            var secondBuildEvent = await app.ResourceNotifications.WaitForResourceAsync(
+                $"{DotnetProjectBuildCoordinator.BuildResourceName}-2",
+                resourceEvent => DotnetProjectBuildCoordinator.IsSettledBuildSnapshot(resourceEvent.Snapshot),
+                completionCts.Token);
+            await Task.WhenAll(
+                app.ResourceNotifications.WaitForResourceAsync("first", KnownResourceStates.Finished, completionCts.Token),
+                app.ResourceNotifications.WaitForResourceAsync("second", KnownResourceStates.Finished, completionCts.Token));
+
+            Assert.Equal(0, secondBuildEvent.Snapshot.ExitCode);
+        }
+
+        Assert.Equal(2, builder.Resources.OfType<DotnetProjectBuildResource>().Count());
+        Assert.Equal("started", File.ReadAllText(firstSentinel));
+        Assert.Equal("started", File.ReadAllText(secondSentinel));
+
+        using var stopCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);
+        await app.StopAsync(stopCts.Token);
+    }
+
+    [Fact]
+    [RequiresTools(["dotnet"])]
+    public async Task FailedFirstBuildGroupPreventsLaterGroupAndServicesFromStarting()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var brokenProject = CreateBrokenProject(workspace.Path, "FIRST_BUILD_FAILED");
+        var secondBuildMarker = Path.Combine(workspace.Path, "second-built.txt");
+        var secondProject = CreateSentinelProject(workspace.Path, "Second", $$"""
+            <Target Name="RecordSecondBuild" BeforeTargets="CoreCompile">
+              <WriteLinesToFile File="{{secondBuildMarker}}" Lines="built" Overwrite="true" />
+            </Target>
+            """);
+        var secondSentinel = Path.Combine(workspace.Path, "second-ran.txt");
+
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper).WithResourceCleanUp(true);
+        builder.AddDotnetProject("broken", brokenProject, options => options.ExcludeLaunchProfile = true);
+        builder.AddDotnetProject("second", secondProject, options => options.ExcludeLaunchProfile = true)
+            .WithEnvironment("BUILD_FLAVOR", "custom")
+            .WithArgs("--", secondSentinel);
+        await using var app = builder.Build();
+
+        using (var startCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            await app.StartAsync(startCts.Token);
+        }
+
+        using (var failureCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            var firstBuildEvent = await app.ResourceNotifications.WaitForResourceAsync(
+                DotnetProjectBuildCoordinator.BuildResourceName,
+                resourceEvent => DotnetProjectBuildCoordinator.IsSettledBuildSnapshot(resourceEvent.Snapshot),
+                failureCts.Token);
+            var secondBuildEvent = await app.ResourceNotifications.WaitForResourceAsync(
+                $"{DotnetProjectBuildCoordinator.BuildResourceName}-2",
+                resourceEvent => DotnetProjectBuildCoordinator.IsSettledBuildSnapshot(resourceEvent.Snapshot),
+                failureCts.Token);
+            await app.ResourceNotifications.WaitForResourceAsync(
+                "second",
+                KnownResourceStates.FailedToStart,
+                failureCts.Token);
+
+            Assert.NotEqual(0, firstBuildEvent.Snapshot.ExitCode);
+            Assert.Equal(KnownResourceStates.FailedToStart, secondBuildEvent.Snapshot.State?.Text);
+        }
+
+        Assert.False(File.Exists(secondBuildMarker));
+        Assert.False(File.Exists(secondSentinel));
+
+        using var stopCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);
+        await app.StopAsync(stopCts.Token);
+    }
+
+    [Fact]
+    [RequiresTools(["dotnet"])]
+    public async Task MissingProjectFailsWithoutBlockingValidSibling()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var validProject = CreateProjectFile(workspace.Path, "Valid", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net8.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(validProject)!, "Program.cs"), """
+            System.IO.File.WriteAllText(args[0], "started");
+            """);
+        var sentinelPath = Path.Combine(workspace.Path, "valid-ran.txt");
+        var missingProject = Path.Combine(workspace.Path, "Missing", "Missing.csproj");
+
+        using var builder = TestDistributedApplicationBuilder.Create(
+            options => options.ProjectDirectory = workspace.Path,
+            outputHelper).WithResourceCleanUp(true);
+        builder.AddDotnetProject("valid", validProject, options => options.ExcludeLaunchProfile = true)
+            .WithArgs("--", sentinelPath);
+        var missing = builder.AddDotnetProject("missing", missingProject, options => options.ExcludeLaunchProfile = true);
+        await using var app = builder.Build();
+
+        using (var startCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            await app.StartAsync(startCts.Token);
+        }
+
+        using (var completionCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan))
+        {
+            await Task.WhenAll(
+                app.ResourceNotifications.WaitForResourceAsync("valid", KnownResourceStates.Finished, completionCts.Token),
+                app.ResourceNotifications.WaitForResourceAsync("missing", KnownResourceStates.FailedToStart, completionCts.Token));
+        }
+
+        var buildResource = Assert.Single(builder.Resources.OfType<DotnetProjectBuildResource>());
+        Assert.Equal([NormalizeProjectPath(validProject)], buildResource.ProjectPaths);
+        Assert.False(missing.Resource.Annotations.OfType<DotnetProjectMetadata>().Single().SuppressBuild);
+        Assert.Equal("started", File.ReadAllText(sentinelPath));
+
+        using var stopCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);
+        await app.StopAsync(stopCts.Token);
+    }
+
+    [Fact]
+    [RequiresTools(["dotnet"])]
     public async Task ResourceEnvironmentIsAppliedToContextSpecificBuild()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
@@ -900,7 +1100,7 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         using var builder = TestDistributedApplicationBuilder.Create(
             options => options.ProjectDirectory = workspace.Path,
             outputHelper).WithResourceCleanUp(true);
-        builder.AddDotnetProject("environment-build", projectPath, options => options.ExcludeLaunchProfile = true)
+        var project = builder.AddDotnetProject("environment-build", projectPath, options => options.ExcludeLaunchProfile = true)
             .WithEnvironment("BUILD_FLAVOR", "custom")
             .WithEnvironment("SENTINEL_PATH", sentinelPath);
         await using var app = builder.Build();
@@ -919,6 +1119,12 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
         }
 
         Assert.Equal("started", File.ReadAllText(sentinelPath));
+
+        var rebuildResult = await app.ResourceCommands.ExecuteCommandAsync(
+            project.Resource,
+            KnownResourceCommands.RebuildCommand,
+            TestContext.Current.CancellationToken);
+        Assert.True(rebuildResult.Success);
 
         using var stopCts = new CancellationTokenSource(TestConstants.LongTimeoutTimeSpan);
         await app.StopAsync(stopCts.Token);
@@ -1146,6 +1352,23 @@ public class DotnetProjectBuildCoordinatorTests(ITestOutputHelper outputHelper)
             File.WriteAllText(
                 args[0],
                 SharedValue.Value);
+            """);
+        return projectPath;
+    }
+
+    private static string CreateSentinelProject(string root, string name, string additionalTargets)
+    {
+        var projectPath = CreateProjectFile(root, name, $$"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net8.0</TargetFramework>
+              </PropertyGroup>
+              {{additionalTargets}}
+            </Project>
+            """);
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(projectPath)!, "Program.cs"), """
+            System.IO.File.WriteAllText(args[0], "started");
             """);
         return projectPath;
     }

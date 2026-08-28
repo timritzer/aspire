@@ -11,7 +11,7 @@ import { openAspireView } from './helpers/vscode';
 suite('Aspire coordinated build E2E', function () {
     this.timeout(240000);
 
-    test('uses coordinated Release output without rebuilding the project', async () => {
+    test('uses coordinated build environment and Release output without rebuilding the project', async () => {
         await openAspireView();
         await waitForRepositoryIdle();
 
@@ -26,12 +26,15 @@ suite('Aspire coordinated build E2E', function () {
                   <PropertyGroup>
                     <OutputType>Exe</OutputType>
                     <TargetFramework>net10.0</TargetFramework>
+                    <OutputPath Condition="'$(BUILD_FLAVOR)' == 'custom'">bin/custom/</OutputPath>
+                    <OutputPath Condition="'$(RUNTIME_ONLY)' != ''">bin/wrong/</OutputPath>
                   </PropertyGroup>
                 </Project>
             `);
             writeFileWithRetry(programPath, 'System.Console.WriteLine("coordinated");\n');
             execFileSync('dotnet', ['build', projectPath, '--configuration', 'Release', '--nologo'], {
                 cwd: projectDirectory,
+                env: { ...process.env, BUILD_FLAVOR: 'custom' },
                 stdio: 'pipe',
             });
 
@@ -42,18 +45,23 @@ suite('Aspire coordinated build E2E', function () {
                 type: 'project',
                 project_path: projectPath,
                 build_configuration: 'Release',
+                build_environment_variable_names: ['BUILD_FLAVOR'],
                 suppress_build: true,
             };
             const controlStatus = await executeE2eControlCommand({
                 name: 'createResourceDebugConfiguration',
                 launchConfig,
+                env: [
+                    { name: 'BUILD_FLAVOR', value: 'custom' },
+                    { name: 'RUNTIME_ONLY', value: 'runtime-value' },
+                ],
                 debug: false,
                 isApphost: true,
             }, { timeoutMs: 180000 });
             const debugConfiguration = controlStatus.result as { program?: string };
 
             assert.ok(debugConfiguration.program);
-            assert.match(debugConfiguration.program.replaceAll('\\', '/'), /\/bin\/Release\//);
+            assert.match(debugConfiguration.program.replaceAll('\\', '/'), /\/bin\/custom\//);
         } finally {
             fs.rmSync(projectDirectory, { recursive: true, force: true });
         }

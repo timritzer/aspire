@@ -31,6 +31,9 @@ internal static class ProjectLaunchConfigurationFactory
             ProjectPath = projectMetadata.ProjectPath,
             Mode = mode,
             BuildConfiguration = launchDefaults?.BuildConfiguration,
+            BuildEnvironmentVariableNames = projectMetadata.BuildEnvironmentVariableNames.Count == 0
+                ? null
+                : [.. projectMetadata.BuildEnvironmentVariableNames],
             SuppressBuild = ShouldSuppressIdeBuild(resource, projectMetadata),
             // The launch profile selection lives on the resource rather than on the project metadata, so it
             // can only be resolved when the configuration is produced, not when debug support is registered.

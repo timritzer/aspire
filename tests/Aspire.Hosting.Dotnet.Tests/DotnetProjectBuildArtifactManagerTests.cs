@@ -133,6 +133,20 @@ public class DotnetProjectBuildArtifactManagerTests(ITestOutputHelper outputHelp
     }
 
     [Fact]
+    public async Task StateIsPublishedWithoutLeavingTemporaryFiles()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        using var manager = new DotnetProjectBuildArtifactManager(buildDirectory, TimeProvider.System);
+
+        await PublishAsync(manager, "aaaaaaaaaaaa");
+
+        var statePath = manager.GetStatePath("aaaaaaaaaaaa");
+        Assert.Equal("0", File.ReadAllText(statePath));
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(statePath)!, ".*.tmp"));
+    }
+
+    [Fact]
     public async Task MissingBuildProjectIsRegeneratedWhileLeaseIsHeld()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
@@ -176,21 +190,37 @@ public class DotnetProjectBuildArtifactManagerTests(ITestOutputHelper outputHelp
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var timeProvider = new FakeTimeProvider(s_startTime);
         var buildDirectory = Path.Combine(workspace.Path, ".aspire", "build");
+        var stateDirectory = Path.Combine(buildDirectory, ".artifacts", "v1");
         Directory.CreateDirectory(buildDirectory);
-        var oldTemporaryPath = Path.Combine(buildDirectory, ".old.tmp");
-        var recentTemporaryPath = Path.Combine(buildDirectory, ".recent.tmp");
-        File.WriteAllText(oldTemporaryPath, "old");
-        File.WriteAllText(recentTemporaryPath, "recent");
-        File.SetLastWriteTimeUtc(
-            oldTemporaryPath,
-            (s_startTime - DotnetProjectBuildArtifactManager.TemporaryFileRetentionPeriod - TimeSpan.FromMinutes(1)).UtcDateTime);
-        File.SetLastWriteTimeUtc(recentTemporaryPath, s_startTime.UtcDateTime);
+        Directory.CreateDirectory(stateDirectory);
+        var oldTemporaryPaths = new[]
+        {
+            Path.Combine(buildDirectory, ".old.tmp"),
+            Path.Combine(stateDirectory, ".old.tmp"),
+        };
+        var recentTemporaryPaths = new[]
+        {
+            Path.Combine(buildDirectory, ".recent.tmp"),
+            Path.Combine(stateDirectory, ".recent.tmp"),
+        };
+        foreach (var oldTemporaryPath in oldTemporaryPaths)
+        {
+            File.WriteAllText(oldTemporaryPath, "old");
+            File.SetLastWriteTimeUtc(
+                oldTemporaryPath,
+                (s_startTime - DotnetProjectBuildArtifactManager.TemporaryFileRetentionPeriod - TimeSpan.FromMinutes(1)).UtcDateTime);
+        }
+        foreach (var recentTemporaryPath in recentTemporaryPaths)
+        {
+            File.WriteAllText(recentTemporaryPath, "recent");
+            File.SetLastWriteTimeUtc(recentTemporaryPath, s_startTime.UtcDateTime);
+        }
 
         using var manager = new DotnetProjectBuildArtifactManager(buildDirectory, timeProvider);
         await PublishAsync(manager, "aaaaaaaaaaaa");
 
-        Assert.False(File.Exists(oldTemporaryPath));
-        Assert.True(File.Exists(recentTemporaryPath));
+        Assert.All(oldTemporaryPaths, path => Assert.False(File.Exists(path)));
+        Assert.All(recentTemporaryPaths, path => Assert.True(File.Exists(path)));
     }
 
     private static Task<string> PublishAsync(DotnetProjectBuildArtifactManager manager, string hash) =>

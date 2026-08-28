@@ -311,9 +311,9 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
     [UnsupportedOSPlatform("windows")]
     public async Task WriteAllTextAtomicallyAsync_RefusesReadOnlyUnixFile()
     {
-        if (OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows() || Environment.IsPrivilegedProcess)
         {
-            Assert.Skip("Unix file modes are required for this test.");
+            Assert.Skip("Requires a non-privileged process on a platform with Unix file modes.");
         }
 
         using var workspace = TemporaryWorkspace.CreateForCli(outputHelper);

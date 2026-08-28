@@ -1,7 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#pragma warning disable ASPIRECOMMAND001
+#pragma warning disable ASPIRECOMMAND001, ASPIREENVIRONMENT001
 
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -479,7 +479,7 @@ public static partial class DevTunnelsResourceBuilderExtensions
 
         builder
             .WithReferenceRelationship(tunnelResource)
-            .WithEnvironment(context =>
+            .WithRuntimeEnvironment(context =>
             {
                 // Determine what to inject based on the annotation on the destination resource
                 var injectionAnnotation = context.Resource.TryGetLastAnnotation<ReferenceEnvironmentInjectionAnnotation>(out var annotation) ? annotation : null;

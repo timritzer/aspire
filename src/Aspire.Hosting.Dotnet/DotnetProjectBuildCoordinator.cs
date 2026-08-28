@@ -299,6 +299,20 @@ internal static class DotnetProjectBuildCoordinator
                     registration.Resource.Annotations.OfType<DotnetProjectMetadata>().Single()))
                 .Where(entry => IsProjectFile(entry.Metadata.ProjectPath))
                 .ToArray();
+            var missingProjectEntries = projectEntries
+                .Where(entry => !File.Exists(entry.Metadata.ProjectPath))
+                .ToArray();
+            foreach (var missingEntry in missingProjectEntries)
+            {
+                // Missing project files intentionally remain on the ordinary resource-start path so the
+                // resulting dotnet error names only that resource instead of failing the shared build.
+                missingEntry.Metadata.SuppressBuild = false;
+                RemoveEagerBuildDependencies([missingEntry.Registration.Resource]);
+            }
+            projectEntries = projectEntries
+                .Where(entry => File.Exists(entry.Metadata.ProjectPath))
+                .ToArray();
+
             if (projectEntries.Length == 0)
             {
                 RemoveEagerBuildDependencies(activeRegistrations.Select(registration => registration.Resource));
@@ -358,6 +372,11 @@ internal static class DotnetProjectBuildCoordinator
                         buildResource.ConfigureDirectBuild(entry.Metadata.ProjectPath, step.WorkingDirectory);
                         var environmentAnnotation = CopyProjectEnvironment(entry, buildResource);
                         rollbackActions.Push(() => buildResource.Annotations.Remove(environmentAnnotation));
+                        if (FindRebuilder(model, entry.Registration.Resource) is { } rebuilder)
+                        {
+                            var rebuildEnvironmentAnnotation = CopyProjectEnvironment(entry, rebuilder);
+                            rollbackActions.Push(() => rebuilder.Annotations.Remove(rebuildEnvironmentAnnotation));
+                        }
                     }
 
                     buildResource.RegisterForShutdown(applicationLifetime);
@@ -378,9 +397,12 @@ internal static class DotnetProjectBuildCoordinator
                     var resource = registration.Resource;
                     if (resource.Annotations.OfType<DotnetProjectMetadata>().SingleOrDefault() is { } metadata &&
                         IsSupportedPath(metadata.ProjectPath) &&
-                        AddBuildDependency(_builder, resource, finalBuildResource) is { } rollback)
+                        (!IsProjectFile(metadata.ProjectPath) || File.Exists(metadata.ProjectPath)))
                     {
-                        rollbackActions.Push(rollback);
+                        if (AddBuildDependency(_builder, resource, finalBuildResource) is { } rollback)
+                        {
+                            rollbackActions.Push(rollback);
+                        }
                     }
                 }
 
@@ -488,7 +510,7 @@ internal static class DotnetProjectBuildCoordinator
 
         private static EnvironmentCallbackAnnotation CopyProjectEnvironment(
             ProjectEntry entry,
-            DotnetProjectBuildResource buildResource)
+            IResource buildResource)
         {
             // Build-plan materialization is the final action of BeforeStart, so this snapshot includes every
             // callback that can affect the coordinated initial build without admitting later runtime mutations.
@@ -512,10 +534,21 @@ internal static class DotnetProjectBuildCoordinator
                 {
                     await callback.Callback(projectContext).ConfigureAwait(false);
                 }
+
+                entry.Metadata.SetBuildEnvironmentVariableNames(context.EnvironmentVariables.Keys);
             });
             buildResource.Annotations.Add(annotation);
             return annotation;
         }
+
+        private static IResource? FindRebuilder(
+            DistributedApplicationModel model,
+            DotnetProjectResource resource) =>
+            model.Resources
+                .SingleOrDefault(candidate =>
+                    candidate.Name == $"{resource.Name}-rebuilder" &&
+                    candidate is IResourceWithParent<IResource> parent &&
+                    ReferenceEquals(parent.Parent, resource));
 
         private static string? FindNearestGlobalJson(string workingDirectory)
         {

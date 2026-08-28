@@ -84,7 +84,7 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
                 // Reset the inactivity clock while holding the same cross-process lock used by the sweeper.
                 // If this write fails, fail the build rather than returning an artifact that another AppHost
                 // could later mistake for continuously inactive.
-                WriteState(hash, ActiveState);
+                WriteState(hash, ActiveState, logger);
             }
             catch
             {
@@ -373,14 +373,20 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
 
     private void SweepTemporaryFiles(ILogger logger)
     {
+        SweepTemporaryFiles(BuildDirectory, logger);
+        SweepTemporaryFiles(GetStateDirectory(), logger);
+    }
+
+    private void SweepTemporaryFiles(string directory, ILogger logger)
+    {
         string[] temporaryPaths;
         try
         {
-            temporaryPaths = Directory.GetFiles(BuildDirectory, ".*.tmp");
+            temporaryPaths = Directory.GetFiles(directory, ".*.tmp");
         }
         catch (Exception ex) when (ex is DirectoryNotFoundException or IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            logger.LogDebug(ex, "Failed to enumerate temporary coordinated build project files in '{Path}'.", BuildDirectory);
+            logger.LogDebug(ex, "Failed to enumerate temporary coordinated build project files in '{Path}'.", directory);
             return;
         }
 
@@ -439,18 +445,31 @@ internal sealed class DotnetProjectBuildArtifactManager : IDisposable
         }
     }
 
-    private void WriteState(string hash, string state)
+    private void WriteState(string hash, string state, ILogger logger)
     {
         var stateDirectory = GetStateDirectory();
         Directory.CreateDirectory(stateDirectory);
-        File.WriteAllText(GetStatePath(hash), state);
+        var statePath = GetStatePath(hash);
+        var temporaryPath = Path.Combine(stateDirectory, $".{Path.GetRandomFileName()}.tmp");
+        try
+        {
+            File.WriteAllText(temporaryPath, state);
+            File.Move(temporaryPath, statePath, overwrite: true);
+        }
+        finally
+        {
+            TryDelete(
+                temporaryPath,
+                logger,
+                "Failed to delete temporary coordinated build project state '{Path}'.");
+        }
     }
 
     private void TryWriteState(string hash, string state, ILogger logger)
     {
         try
         {
-            WriteState(hash, state);
+            WriteState(hash, state, logger);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {

@@ -406,7 +406,19 @@ internal sealed class InitCommand : BaseCommand
         }
         finally
         {
-            File.Delete(temporaryPath);
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch (IOException)
+            {
+                // Preserve the write or move failure. A leftover sibling temp file cannot affect the
+                // destination because only the final atomic move publishes it.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Preserve the write or move failure for the same reason as an I/O cleanup failure.
+            }
         }
     }
 
