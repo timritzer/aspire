@@ -89,8 +89,16 @@ public sealed class AnalyzeCiFailureWorkflowTests
             Assert.Contains("Verdict '${VERDICT}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("type '${CAUSE_TYPE}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("A transient-infra verdict requires at least one infra-failure cause and no other cause types\"\nexit 1", workflow, StringComparison.Ordinal);
-            Assert.Contains("A code-issue verdict must not include cause files\"\nexit 1", workflow, StringComparison.Ordinal);
-            Assert.Contains("A main-repository-breakage verdict requires a matching cause file\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("if [ \"$FLAKY_CAUSE_COUNT\" -eq 0 ] || [ \"$MAIN_BREAK_CAUSE_COUNT\" -ne 0 ]; then", workflow, StringComparison.Ordinal);
+            Assert.Contains("A flaky-test verdict requires at least one flaky-test cause and no main repository breakage causes\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("if [ \"$CAUSE_COUNT\" -ne 0 ] || [ \"$CODE_ISSUE_JOB_COUNT\" -eq 0 ]; then", workflow, StringComparison.Ordinal);
+            Assert.Contains("A code-issue verdict requires at least one code-issue job and must not include cause files\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("if [ \"$MAIN_BREAK_CAUSE_COUNT\" -eq 0 ] || [ \"$MAIN_BREAK_CAUSE_COUNT\" -ne \"$CAUSE_COUNT\" ]; then", workflow, StringComparison.Ordinal);
+            Assert.Contains("A main-repository-breakage verdict requires at least one matching cause and no transient causes\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("if [ \"$MAIN_BREAK_CAUSE_COUNT\" -eq 0 ] || [ \"$MAIN_BREAK_CAUSE_COUNT\" -eq \"$CAUSE_COUNT\" ]; then", workflow, StringComparison.Ordinal);
+            Assert.Contains("A mixed verdict for main requires at least one transient cause and one main repository breakage cause\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("if [ \"$CAUSE_COUNT\" -eq 0 ] || [ \"$CODE_ISSUE_JOB_COUNT\" -eq 0 ]; then", workflow, StringComparison.Ordinal);
+            Assert.Contains("A mixed verdict for a pull request requires at least one transient cause and one code-issue job\"\nexit 1", workflow, StringComparison.Ordinal);
         });
     }
 
@@ -104,6 +112,14 @@ public sealed class AnalyzeCiFailureWorkflowTests
             Assert.Contains("analysis.verdict !== 'transient-infra'", workflow, StringComparison.Ordinal);
             Assert.Contains("if (trustedRunScope === 'pull-request')", workflow, StringComparison.Ordinal);
             Assert.Contains("run_id: trustedRunId", workflow, StringComparison.Ordinal);
+
+            var rerunValidation = GetSection(
+                workflow,
+                "const analysisFile = path.join(path.dirname(outputFile), 'agent', 'analysis-result.json');",
+                "if (!enableRerun)");
+            Assert.Contains("const causesDir = path.join(path.dirname(outputFile), 'agent', 'causes');", rerunValidation, StringComparison.Ordinal);
+            Assert.Contains("core.setFailed('Rerun requires at least one valid infra-failure cause');\nreturn;", rerunValidation, StringComparison.Ordinal);
+            Assert.Contains("cause.type !== 'infra-failure'", rerunValidation, StringComparison.Ordinal);
         });
     }
 

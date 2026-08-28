@@ -618,7 +618,9 @@ safe-outputs:
 
             CAUSE_COUNT=0
             INFRA_CAUSE_COUNT=0
+            FLAKY_CAUSE_COUNT=0
             MAIN_BREAK_CAUSE_COUNT=0
+            CODE_ISSUE_JOB_COUNT=$(jq '[.failed_jobs[]? | select(.classification == "code-issue")] | length' "$ANALYSIS_FILE")
             if [ -d "$CAUSES_DIR" ]; then
               for CAUSE_FILE in "$CAUSES_DIR"/*.json; do
                 [ -f "$CAUSE_FILE" ] || continue
@@ -649,6 +651,9 @@ safe-outputs:
                   infra-failure)
                     INFRA_CAUSE_COUNT=$((INFRA_CAUSE_COUNT + 1))
                     ;;
+                  flaky-test)
+                    FLAKY_CAUSE_COUNT=$((FLAKY_CAUSE_COUNT + 1))
+                    ;;
                   main-repository-breakage)
                     MAIN_BREAK_CAUSE_COUNT=$((MAIN_BREAK_CAUSE_COUNT + 1))
                     ;;
@@ -664,28 +669,38 @@ safe-outputs:
                 fi
                 ;;
               flaky-test)
-                if [ "$CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne 0 ]; then
-                  echo "::error::A flaky-test verdict requires at least one transient cause and no main repository breakage causes"
+                if [ "$FLAKY_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne 0 ]; then
+                  echo "::error::A flaky-test verdict requires at least one flaky-test cause and no main repository breakage causes"
                   exit 1
                 fi
                 ;;
               code-issue)
-                if [ "$CAUSE_COUNT" -ne 0 ]; then
-                  echo "::error::A code-issue verdict must not include cause files"
+                if [ "$CAUSE_COUNT" -ne 0 ] || [ "$CODE_ISSUE_JOB_COUNT" -eq 0 ]; then
+                  echo "::error::A code-issue verdict requires at least one code-issue job and must not include cause files"
                   exit 1
                 fi
                 ;;
               main-repository-breakage)
-                if [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ]; then
-                  echo "::error::A main-repository-breakage verdict requires a matching cause file"
+                if [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne "$CAUSE_COUNT" ]; then
+                  echo "::error::A main-repository-breakage verdict requires at least one matching cause and no transient causes"
                   exit 1
                 fi
                 ;;
               mixed)
-                if [ "$CAUSE_COUNT" -eq 0 ]; then
-                  echo "::error::A mixed verdict requires at least one transient or main-breakage cause file"
-                  exit 1
-                fi
+                case "$TRUSTED_RUN_SCOPE" in
+                  main)
+                    if [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -eq "$CAUSE_COUNT" ]; then
+                      echo "::error::A mixed verdict for main requires at least one transient cause and one main repository breakage cause"
+                      exit 1
+                    fi
+                    ;;
+                  pull-request)
+                    if [ "$CAUSE_COUNT" -eq 0 ] || [ "$CODE_ISSUE_JOB_COUNT" -eq 0 ]; then
+                      echo "::error::A mixed verdict for a pull request requires at least one transient cause and one code-issue job"
+                      exit 1
+                    fi
+                    ;;
+                esac
                 ;;
             esac
         - name: Publish analysis data and comment on PR
@@ -1126,6 +1141,7 @@ safe-outputs:
               }
 
               const analysisFile = path.join(path.dirname(outputFile), 'agent', 'analysis-result.json');
+              const causesDir = path.join(path.dirname(outputFile), 'agent', 'causes');
               const runContextFile = path.join('ci-failure-data', 'run-context.json');
               if (!fs.existsSync(analysisFile) || !fs.existsSync(runContextFile)) {
                 core.setFailed('Analysis result or trusted run context not found');
@@ -1164,6 +1180,31 @@ safe-outputs:
               if (trustedRunScope !== 'main' && trustedRunScope !== 'pull-request') {
                 core.setFailed(`Unsupported trusted run scope: ${trustedRunScope}`);
                 return;
+              }
+
+              const causeFiles = fs.existsSync(causesDir)
+                ? fs.readdirSync(causesDir).filter(fileName => fileName.endsWith('.json'))
+                : [];
+              if (causeFiles.length === 0) {
+                core.setFailed('Rerun requires at least one valid infra-failure cause');
+                return;
+              }
+              for (const causeFileName of causeFiles) {
+                let cause;
+                try {
+                  cause = JSON.parse(fs.readFileSync(path.join(causesDir, causeFileName), 'utf8'));
+                } catch (error) {
+                  core.setFailed(`Invalid JSON in rerun cause file ${causeFileName}: ${error.message}`);
+                  return;
+                }
+
+                const causeId = String(cause.id || '');
+                if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(causeId) ||
+                    `${causeId}.json` !== causeFileName ||
+                    cause.type !== 'infra-failure') {
+                  core.setFailed(`Rerun cause ${causeFileName} must be a valid infra-failure cause`);
+                  return;
+                }
               }
 
               if (!enableRerun) {
