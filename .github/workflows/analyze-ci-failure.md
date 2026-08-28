@@ -606,6 +606,14 @@ safe-outputs:
               echo "::error::Main run analysis must not identify a subject PR"
               exit 1
             fi
+            if ! jq -e '
+              (.failed_jobs | type == "array") and
+              (.causes | type == "array") and
+              all(.causes[]; type == "string")
+            ' "$ANALYSIS_FILE" >/dev/null; then
+              echo "::error::Analysis must contain failed_jobs and string-valued causes arrays"
+              exit 1
+            fi
 
             case "${TRUSTED_RUN_SCOPE}:${VERDICT}" in
               main:transient-infra|main:flaky-test|main:main-repository-breakage|main:mixed|pull-request:transient-infra|pull-request:flaky-test|pull-request:code-issue|pull-request:mixed)
@@ -618,9 +626,27 @@ safe-outputs:
 
             CAUSE_COUNT=0
             INFRA_CAUSE_COUNT=0
-            FLAKY_CAUSE_COUNT=0
             MAIN_BREAK_CAUSE_COUNT=0
+            SUMMARY_CAUSE_COUNT=$(jq '.causes | length' "$ANALYSIS_FILE")
+            UNIQUE_SUMMARY_CAUSE_COUNT=$(jq '.causes | unique | length' "$ANALYSIS_FILE")
+            FAILED_JOB_COUNT=$(jq '[.failed_jobs[]?] | length' "$ANALYSIS_FILE")
+            INFRA_JOB_COUNT=$(jq '[.failed_jobs[]? | select(.classification == "transient-infra")] | length' "$ANALYSIS_FILE")
+            FLAKY_JOB_COUNT=$(jq '[.failed_jobs[]? | select(.classification == "flaky-test")] | length' "$ANALYSIS_FILE")
             CODE_ISSUE_JOB_COUNT=$(jq '[.failed_jobs[]? | select(.classification == "code-issue")] | length' "$ANALYSIS_FILE")
+            MAIN_BREAK_JOB_COUNT=$(jq '[.failed_jobs[]? | select(.classification == "main-repository-breakage")] | length' "$ANALYSIS_FILE")
+            KNOWN_JOB_COUNT=$((INFRA_JOB_COUNT + FLAKY_JOB_COUNT + CODE_ISSUE_JOB_COUNT + MAIN_BREAK_JOB_COUNT))
+            TRANSIENT_JOB_COUNT=$((INFRA_JOB_COUNT + FLAKY_JOB_COUNT))
+
+            if [ "$FAILED_JOB_COUNT" -eq 0 ] || [ "$KNOWN_JOB_COUNT" -ne "$FAILED_JOB_COUNT" ]; then
+              echo "::error::Analysis must classify every failed job with a recognized classification"
+              exit 1
+            fi
+            if { [ "$TRUSTED_RUN_SCOPE" = "main" ] && [ "$CODE_ISSUE_JOB_COUNT" -ne 0 ]; } ||
+               { [ "$TRUSTED_RUN_SCOPE" = "pull-request" ] && [ "$MAIN_BREAK_JOB_COUNT" -ne 0 ]; }; then
+              echo "::error::Analysis contains a failed-job classification that is not permitted for run scope ${TRUSTED_RUN_SCOPE}"
+              exit 1
+            fi
+
             if [ -d "$CAUSES_DIR" ]; then
               for CAUSE_FILE in "$CAUSES_DIR"/*.json; do
                 [ -f "$CAUSE_FILE" ] || continue
@@ -634,6 +660,10 @@ safe-outputs:
                 CAUSE_TYPE=$(jq -r '.type // ""' "$CAUSE_FILE")
                 if [[ ! "$CAUSE_ID" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || [ "${CAUSE_ID}.json" != "$CAUSE_BASENAME" ]; then
                   echo "::error::Cause ID must be a lowercase hyphenated slug matching its filename: ${CAUSE_BASENAME}"
+                  exit 1
+                fi
+                if ! jq -e --arg cause_id "$CAUSE_ID" '.causes | index($cause_id) != null' "$ANALYSIS_FILE" >/dev/null; then
+                  echo "::error::Cause ${CAUSE_BASENAME} is not referenced by the analysis summary"
                   exit 1
                 fi
 
@@ -651,52 +681,58 @@ safe-outputs:
                   infra-failure)
                     INFRA_CAUSE_COUNT=$((INFRA_CAUSE_COUNT + 1))
                     ;;
-                  flaky-test)
-                    FLAKY_CAUSE_COUNT=$((FLAKY_CAUSE_COUNT + 1))
-                    ;;
                   main-repository-breakage)
                     MAIN_BREAK_CAUSE_COUNT=$((MAIN_BREAK_CAUSE_COUNT + 1))
                     ;;
                 esac
               done
             fi
+            if [ "$SUMMARY_CAUSE_COUNT" -ne "$UNIQUE_SUMMARY_CAUSE_COUNT" ] ||
+               [ "$SUMMARY_CAUSE_COUNT" -ne "$CAUSE_COUNT" ]; then
+              echo "::error::Analysis cause IDs must uniquely match the generated cause files"
+              exit 1
+            fi
 
             case "$VERDICT" in
               transient-infra)
-                if [ "$CAUSE_COUNT" -eq 0 ] || [ "$INFRA_CAUSE_COUNT" -ne "$CAUSE_COUNT" ]; then
-                  echo "::error::A transient-infra verdict requires at least one infra-failure cause and no other cause types"
+                if [ "$INFRA_JOB_COUNT" -ne "$FAILED_JOB_COUNT" ] ||
+                   [ "$CAUSE_COUNT" -eq 0 ] || [ "$INFRA_CAUSE_COUNT" -ne "$CAUSE_COUNT" ]; then
+                  echo "::error::A transient-infra verdict requires every failed job and cause to be an infrastructure failure"
                   exit 1
                 fi
                 ;;
               flaky-test)
-                if [ "$FLAKY_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne 0 ]; then
-                  echo "::error::A flaky-test verdict requires at least one flaky-test cause and no main repository breakage causes"
+                if [ "$FLAKY_JOB_COUNT" -eq 0 ] || [ "$TRANSIENT_JOB_COUNT" -ne "$FAILED_JOB_COUNT" ] ||
+                   [ "$CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne 0 ]; then
+                  echo "::error::A flaky-test verdict requires at least one flaky job, only transient failed jobs, and only transient causes"
                   exit 1
                 fi
                 ;;
               code-issue)
-                if [ "$CAUSE_COUNT" -ne 0 ] || [ "$CODE_ISSUE_JOB_COUNT" -eq 0 ]; then
-                  echo "::error::A code-issue verdict requires at least one code-issue job and must not include cause files"
+                if [ "$CODE_ISSUE_JOB_COUNT" -ne "$FAILED_JOB_COUNT" ] || [ "$CAUSE_COUNT" -ne 0 ]; then
+                  echo "::error::A code-issue verdict requires every failed job to be a code issue and must not include cause files"
                   exit 1
                 fi
                 ;;
               main-repository-breakage)
-                if [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne "$CAUSE_COUNT" ]; then
-                  echo "::error::A main-repository-breakage verdict requires at least one matching cause and no transient causes"
+                if [ "$MAIN_BREAK_JOB_COUNT" -ne "$FAILED_JOB_COUNT" ] ||
+                   [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -ne "$CAUSE_COUNT" ]; then
+                  echo "::error::A main-repository-breakage verdict requires every failed job and cause to be a main repository breakage"
                   exit 1
                 fi
                 ;;
               mixed)
                 case "$TRUSTED_RUN_SCOPE" in
                   main)
-                    if [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -eq "$CAUSE_COUNT" ]; then
-                      echo "::error::A mixed verdict for main requires at least one transient cause and one main repository breakage cause"
+                    if [ "$MAIN_BREAK_JOB_COUNT" -eq 0 ] || [ "$TRANSIENT_JOB_COUNT" -eq 0 ] ||
+                       [ "$MAIN_BREAK_CAUSE_COUNT" -eq 0 ] || [ "$MAIN_BREAK_CAUSE_COUNT" -eq "$CAUSE_COUNT" ]; then
+                      echo "::error::A mixed verdict for main requires transient and main-breakage failed jobs and causes"
                       exit 1
                     fi
                     ;;
                   pull-request)
-                    if [ "$CAUSE_COUNT" -eq 0 ] || [ "$CODE_ISSUE_JOB_COUNT" -eq 0 ]; then
-                      echo "::error::A mixed verdict for a pull request requires at least one transient cause and one code-issue job"
+                    if [ "$CODE_ISSUE_JOB_COUNT" -eq 0 ] || [ "$TRANSIENT_JOB_COUNT" -eq 0 ] || [ "$CAUSE_COUNT" -eq 0 ]; then
+                      echo "::error::A mixed verdict for a pull request requires transient and code-issue failed jobs plus a transient cause"
                       exit 1
                     fi
                     ;;
@@ -1181,12 +1217,22 @@ safe-outputs:
                 core.setFailed(`Unsupported trusted run scope: ${trustedRunScope}`);
                 return;
               }
+              if (!Array.isArray(analysis.failed_jobs) ||
+                  analysis.failed_jobs.length === 0 ||
+                  !analysis.failed_jobs.every(job => job && job.classification === 'transient-infra')) {
+                core.setFailed('Rerun requires every failed job to be classified as transient-infra');
+                return;
+              }
 
+              const summaryCauseIds = Array.isArray(analysis.causes) ? analysis.causes : [];
               const causeFiles = fs.existsSync(causesDir)
                 ? fs.readdirSync(causesDir).filter(fileName => fileName.endsWith('.json'))
                 : [];
-              if (causeFiles.length === 0) {
-                core.setFailed('Rerun requires at least one valid infra-failure cause');
+              if (summaryCauseIds.length === 0 ||
+                  !summaryCauseIds.every(causeId => typeof causeId === 'string') ||
+                  new Set(summaryCauseIds).size !== summaryCauseIds.length ||
+                  causeFiles.length !== summaryCauseIds.length) {
+                core.setFailed('Rerun requires unique analysis cause IDs matching the generated cause files');
                 return;
               }
               for (const causeFileName of causeFiles) {
@@ -1201,7 +1247,8 @@ safe-outputs:
                 const causeId = String(cause.id || '');
                 if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(causeId) ||
                     `${causeId}.json` !== causeFileName ||
-                    cause.type !== 'infra-failure') {
+                    cause.type !== 'infra-failure' ||
+                    !summaryCauseIds.includes(causeId)) {
                   core.setFailed(`Rerun cause ${causeFileName} must be a valid infra-failure cause`);
                   return;
                 }
@@ -1309,7 +1356,7 @@ Write the run summary to `/tmp/gh-aw/agent/analysis-result.json`. The JSON must 
       "id": 67890,
       "conclusion": "failure",
       "url": "https://github.com/microsoft/aspire/actions/runs/12345/job/67890",
-      "classification": "transient-infra | flaky-test | code-issue",
+      "classification": "transient-infra | flaky-test | code-issue | main-repository-breakage",
       "reason": "Brief explanation of why this job failed",
       "failed_steps": ["step1", "step2"]
     }
@@ -1462,19 +1509,19 @@ Set `verdict` to `"transient-infra"` in the JSON. Check the `ENABLE_RERUN` envir
 
 **Regardless of `ENABLE_RERUN`:** Emit the `publish-data` safe output so the analysis is pushed to the memory branch and a PR comment is posted.
 
-### If ANY failures are Transient Test Failures (Flaky Tests):
+### If failures include Transient Test Failures and no deterministic failures:
 
 Set `verdict` to `"flaky-test"` in the JSON. Ensure `failed_tests` entries have `classification: "flaky"` and include a `reason` explaining why the test is likely flaky.
 
 Emit the `publish-data` safe output. Do NOT emit `rerun-failed-jobs`.
 
-### If ANY failures are Non-Transient (PR Code Issues):
+### If ALL failures are Non-Transient PR Code Issues:
 
 Set `verdict` to `"code-issue"` in the JSON. Ensure `failed_jobs` entries have `classification: "code-issue"` with a clear `reason` linking the error to PR changes.
 
 Emit the `publish-data` safe output. Do NOT emit `rerun-failed-jobs`.
 
-### If ANY failures are Main Repository Breakages:
+### If ALL failures are Main Repository Breakages:
 
 Set `verdict` to `"main-repository-breakage"` in the JSON. Set `pr` to `null`, populate `triggering_merge_pr` only as non-causal context, and include the main candidate range in `main_context`. Write a `main-repository-breakage` cause file so the publish job creates or updates the dedicated main-CI-break issue.
 
