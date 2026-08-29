@@ -12,6 +12,7 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
     private const string ValidationScriptRelativePath = ".github/workflows/analyze-ci-failure-validation.sh";
 
     private static readonly string s_sourceWorkflow = ReadWorkflow("analyze-ci-failure.md");
+    private static readonly string s_causeIssuePublisher = ReadWorkflow("analyze-ci-failure-cause-issues.js");
     private static readonly string s_validationScript = File.ReadAllText(
         Path.Combine(RepoRoot.Path, ValidationScriptRelativePath));
 
@@ -183,11 +184,12 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
             s_sourceWorkflow,
             StringComparison.Ordinal);
 
+        Assert.Contains("cause.type === 'main-repository-breakage'", s_causeIssuePublisher, StringComparison.Ordinal);
+        Assert.Contains("? '[Main CI Failure]'", s_causeIssuePublisher, StringComparison.Ordinal);
+        Assert.Contains("return [CAUSE_LABEL, 'main-ci-break'];", s_causeIssuePublisher, StringComparison.Ordinal);
+
         ForEachExecutableWorkflow(workflow =>
         {
-            Assert.Contains("CAUSE_TYPE\" = \"main-repository-breakage", workflow, StringComparison.Ordinal);
-            Assert.Contains("LABELS=\"ci-failure-cause,main-ci-break\"", workflow, StringComparison.Ordinal);
-            Assert.Contains("ISSUE_TITLE=$(jq -r '\"[Main CI Failure] \" + .title'", workflow, StringComparison.Ordinal);
             Assert.Contains(
                 "if [ \"$RUN_SCOPE\" = \"main\" ]; then\necho \"Main run analysis is reported through cause issues, not PR comments.\"\nexit 0",
                 workflow,
@@ -200,13 +202,17 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
     {
         ForEachExecutableWorkflow(workflow =>
         {
-            Assert.Contains("sparse-checkout: .github/workflows/analyze-ci-failure-validation.sh", workflow, StringComparison.Ordinal);
+            var sparseCheckout = GetSection(
+                workflow,
+                "name: Checkout workflow helpers",
+                "sparse-checkout-cone-mode: false");
+            Assert.Contains(".github/workflows/analyze-ci-failure-validation.sh", sparseCheckout, StringComparison.Ordinal);
             Assert.Contains("run: bash .github/workflows/analyze-ci-failure-validation.sh", workflow, StringComparison.Ordinal);
             var validationIndex = workflow.IndexOf(
                 "run: bash .github/workflows/analyze-ci-failure-validation.sh",
                 StringComparison.Ordinal);
             var publishStepIndex = workflow.IndexOf(
-                "- name: Publish analysis data and comment on PR",
+                "- name: Publish analysis data and cause issues",
                 validationIndex,
                 StringComparison.Ordinal);
             Assert.True(validationIndex >= 0 && publishStepIndex > validationIndex);
@@ -221,6 +227,13 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
         Assert.Contains("TRUSTED_FAILED_JOBS_FILE=\"ci-failure-data/failed-jobs.json\"", validationScript, StringComparison.Ordinal);
         Assert.Contains("Analysis must contain numeric-ID failed_jobs and string-valued causes arrays\"\nexit 1", validationScript, StringComparison.Ordinal);
         Assert.Contains("Cause ${CAUSE_BASENAME} contains unsupported or publisher-owned fields\"\nexit 1", validationScript, StringComparison.Ordinal);
+        Assert.Contains(
+            "keys - [\"error_pattern\", \"id\", \"job_ids\", \"test_name\", \"title\", \"type\"]",
+            validationScript,
+            StringComparison.Ordinal);
+        Assert.Contains("((.job_ids | type) == \"array\")", validationScript, StringComparison.Ordinal);
+        Assert.Contains("((.job_ids | length) > 0)", validationScript, StringComparison.Ordinal);
+        Assert.Contains("all(.job_ids[]; type == \"number\")", validationScript, StringComparison.Ordinal);
         Assert.Contains("Analysis failed-job IDs do not match the trusted failed jobs\"\nexit 1", validationScript, StringComparison.Ordinal);
         Assert.Contains("Verdict '${VERDICT}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", validationScript, StringComparison.Ordinal);
         Assert.Contains("type '${CAUSE_TYPE}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", validationScript, StringComparison.Ordinal);
@@ -266,6 +279,44 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
             "For pull-request scope, include the subject PR object when the summary provides one; otherwise use `null`.",
             s_sourceWorkflow,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "The union of `job_ids` across all cause files MUST cover every failed job classified as `transient-infra`, `flaky-test`, or `main-repository-breakage`.",
+            s_sourceWorkflow,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CauseIssueLifecycleIsDelegatedToCheckedInModule()
+    {
+        ForEachExecutableWorkflow(workflow =>
+        {
+            Assert.Contains(
+                "require('./.github/workflows/analyze-ci-failure-cause-issues.js')",
+                workflow,
+                StringComparison.Ordinal);
+            Assert.Contains("publishCauseIssues(github, context, core", workflow, StringComparison.Ordinal);
+            var sparseCheckout = GetSection(
+                workflow,
+                "name: Checkout workflow helpers",
+                "sparse-checkout-cone-mode: false");
+            Assert.Contains(
+                ".github/workflows/analyze-ci-failure-cause-issues.js",
+                sparseCheckout,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                ".github/workflows/tracking-issue.js",
+                sparseCheckout,
+                StringComparison.Ordinal);
+
+            var publisher = GetSection(
+                workflow,
+                "name: Publish cause issues",
+                "name: Persist issue links");
+            Assert.DoesNotContain("gh issue list", publisher, StringComparison.Ordinal);
+            Assert.DoesNotContain("gh issue create", publisher, StringComparison.Ordinal);
+            Assert.DoesNotContain("gh issue edit", publisher, StringComparison.Ordinal);
+            Assert.DoesNotContain("gh issue reopen", publisher, StringComparison.Ordinal);
+        });
     }
 
     [Fact]
@@ -278,39 +329,28 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
                 "RUN_CONTEXT_FILE=\"ci-failure-data/run-context.json\"",
                 "# ── 4. Post PR comment using the analysis JSON ──");
 
-            Assert.Contains("RUN_ID=\"$TRUSTED_RUN_ID\"", publisher, StringComparison.Ordinal);
-            Assert.Contains("RUN_SCOPE=\"$TRUSTED_RUN_SCOPE\"", publisher, StringComparison.Ordinal);
-            Assert.Contains("PR_NUMBERS=\"$TRUSTED_PR_NUMBERS\"", publisher, StringComparison.Ordinal);
             Assert.Contains("RUN_URL=$(jq -r '.html_url // \"\"' ci-failure-data/run.json)", publisher, StringComparison.Ordinal);
             Assert.Contains("ANALYZED_AT=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")", publisher, StringComparison.Ordinal);
-            Assert.Contains("FIRST_JOB=$(jq -r '.[0].name // \"unknown\"' \"$TRUSTED_FAILED_JOBS_FILE\")", publisher, StringComparison.Ordinal);
-            Assert.Contains("FAILED_SHA=$(jq -r '.head_sha // \"unknown\"' \"$RUN_CONTEXT_FILE\")", publisher, StringComparison.Ordinal);
-            Assert.Contains("LAST_SUCCESSFUL_SHA=$(jq -r '.head_sha // \"unknown\"' ci-failure-data/last-successful-main-run.json)", publisher, StringComparison.Ordinal);
-            Assert.Contains("TRIGGERING_MERGE=$(jq -r 'if .number then \"#\\(.number) \\(.title)\" else \"Not found\" end' ci-failure-data/triggering-merge-pr.json)", publisher, StringComparison.Ordinal);
             Assert.Contains("($new | del(.occurrences, .issue_url))", publisher, StringComparison.Ordinal);
             Assert.Contains("if $ex.issue_url then {issue_url: $ex.issue_url} else {} end", publisher, StringComparison.Ordinal);
-            Assert.Contains(
-                "Stored cause ${CAUSE_BASENAME} cannot change type from '${CURRENT_CAUSE_TYPE}' to '${CAUSE_TYPE}'\"\nexit 1",
-                publisher,
-                StringComparison.Ordinal);
             var causeTypeIndex = publisher.IndexOf("CAUSE_TYPE=$(jq -r '.type' \"$CAUSE_FILE\")", StringComparison.Ordinal);
             var currentCauseTypeIndex = publisher.IndexOf("CURRENT_CAUSE_TYPE=$(jq -r '.type // \"\"' \"$EXISTING\")", StringComparison.Ordinal);
             Assert.True(causeTypeIndex >= 0 && causeTypeIndex < currentCauseTypeIndex);
-            Assert.Contains("\"$STORED_ISSUE_URL\" =~ ^https://github\\.com/${REPO}/issues/([0-9]+)$", publisher, StringComparison.Ordinal);
-            Assert.Contains(".pull_request == null", publisher, StringComparison.Ordinal);
-            Assert.Contains("any(.labels[]?; .name == \"ci-failure-cause\")", publisher, StringComparison.Ordinal);
-            Assert.Contains("TYPE_MARKER=\"<!-- ci-failure-cause-type:${CAUSE_TYPE} -->\"", publisher, StringComparison.Ordinal);
-            Assert.Contains("map(rtrimstr(\"\\r\"))", publisher, StringComparison.Ordinal);
-            Assert.Contains("$lines[0] == $marker", publisher, StringComparison.Ordinal);
-            Assert.Contains("$lines[1] == $type_marker", publisher, StringComparison.Ordinal);
-            Assert.Contains("[\"**Type**: \" + $cause_type]", publisher, StringComparison.Ordinal);
             Assert.True(
                 publisher.IndexOf("git -C memory-repo push origin \"HEAD:$MEMORY_BRANCH\"", StringComparison.Ordinal) <
-                publisher.IndexOf("# ── 2. Create or update issues for each cause ──", StringComparison.Ordinal));
+                publisher.IndexOf("name: Publish cause issues", StringComparison.Ordinal));
             Assert.Contains("jq -r --arg run_url \"$RUN_URL\"", workflow, StringComparison.Ordinal);
             Assert.Contains(".user.login == \\\"github-actions[bot]\\\"", workflow, StringComparison.Ordinal);
             Assert.Contains("startswith(\\\"${MARKER}\\\\n\\\")", workflow, StringComparison.Ordinal);
         });
+
+        Assert.Contains(
+            "causeIds.some(causeId => lines[0] === causeMarker(causeId))",
+            s_causeIssuePublisher,
+            StringComparison.Ordinal);
+        Assert.Contains("lines[1]?.startsWith('<!-- ci-failure-cause-type:')", s_causeIssuePublisher, StringComparison.Ordinal);
+        Assert.Contains("legacyTypeLines.length === 1", s_causeIssuePublisher, StringComparison.Ordinal);
+        Assert.Contains("tracking.executeIssueReconciliation(", s_causeIssuePublisher, StringComparison.Ordinal);
     }
 
     [Fact]
