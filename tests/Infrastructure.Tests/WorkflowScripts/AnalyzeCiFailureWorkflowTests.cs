@@ -83,14 +83,20 @@ public sealed class AnalyzeCiFailureWorkflowTests
         ForEachExecutableWorkflow(workflow =>
         {
             Assert.Contains("RUN_CONTEXT_FILE=\"ci-failure-data/run-context.json\"", workflow, StringComparison.Ordinal);
+            Assert.Contains("RUN_ID=\"$TRUSTED_RUN_ID\"", workflow, StringComparison.Ordinal);
+            Assert.Contains("RUN_SCOPE=\"$TRUSTED_RUN_SCOPE\"", workflow, StringComparison.Ordinal);
+            Assert.Contains("PR_NUMBERS=\"$TRUSTED_PR_NUMBERS\"", workflow, StringComparison.Ordinal);
             Assert.Contains("ANALYSIS_RUN_SCOPE=$(jq -r '.run_scope' \"$ANALYSIS_FILE\")", workflow, StringComparison.Ordinal);
             Assert.Contains("Analysis result does not match trusted run context\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Main run analysis must not identify a subject PR\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("TRUSTED_FAILED_JOBS_FILE=\"ci-failure-data/failed-jobs.json\"", workflow, StringComparison.Ordinal);
             Assert.Contains("Analysis must contain numeric-ID failed_jobs and string-valued causes arrays\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("Cause ${CAUSE_BASENAME} contains unsupported or publisher-owned fields\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Analysis failed-job IDs do not match the trusted failed jobs\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Verdict '${VERDICT}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("type '${CAUSE_TYPE}' is not permitted for run scope ${TRUSTED_RUN_SCOPE}\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("Cause ${CAUSE_BASENAME} cannot change type from '${PRIOR_CAUSE_TYPE}' to '${CAUSE_TYPE}'\"\nexit 1", workflow, StringComparison.Ordinal);
+            Assert.Contains("Stored cause ${CAUSE_BASENAME} cannot change type from '${CURRENT_CAUSE_TYPE}' to '${CAUSE_TYPE}'\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Cause ${CAUSE_BASENAME} is not referenced by the analysis summary\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Analysis cause IDs must uniquely match the generated cause files\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("Analysis must classify every failed job with a recognized classification\"\nexit 1", workflow, StringComparison.Ordinal);
@@ -98,6 +104,7 @@ public sealed class AnalyzeCiFailureWorkflowTests
             Assert.Contains("if [ \"$INFRA_JOB_COUNT\" -ne \"$FAILED_JOB_COUNT\" ] ||", workflow, StringComparison.Ordinal);
             Assert.Contains("A transient-infra verdict requires every failed job and cause to be an infrastructure failure\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("if [ \"$FLAKY_JOB_COUNT\" -eq 0 ] || [ \"$TRANSIENT_JOB_COUNT\" -ne \"$FAILED_JOB_COUNT\" ] ||", workflow, StringComparison.Ordinal);
+            Assert.Contains("[ \"$FLAKY_CAUSE_COUNT\" -eq 0 ]", workflow, StringComparison.Ordinal);
             Assert.Contains("A flaky-test verdict requires at least one flaky job, only transient failed jobs, and only transient causes\"\nexit 1", workflow, StringComparison.Ordinal);
             Assert.Contains("if [ \"$CODE_ISSUE_JOB_COUNT\" -ne \"$FAILED_JOB_COUNT\" ] || [ \"$CAUSE_COUNT\" -ne 0 ]; then", workflow, StringComparison.Ordinal);
             Assert.Contains("A code-issue verdict requires every failed job to be a code issue and must not include cause files\"\nexit 1", workflow, StringComparison.Ordinal);
@@ -116,6 +123,48 @@ public sealed class AnalyzeCiFailureWorkflowTests
             "Use `\"transient-infra\"` when every failed job is an infrastructure issue, `\"flaky-test\"` when at least one failed job is a flaky test and every failed job is transient",
             s_sourceWorkflow,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "`failed_jobs` MUST contain exactly one object for every failed job in the summary, using its exact numeric ID, with no additions, omissions, or duplicates.",
+            s_sourceWorkflow,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PublisherUsesTrustedMetadataAndVerifiesStoredIssueIdentity()
+    {
+        ForEachExecutableWorkflow(workflow =>
+        {
+            var publisher = GetSection(
+                workflow,
+                "RUN_CONTEXT_FILE=\"ci-failure-data/run-context.json\"",
+                "# ── 4. Post PR comment using the analysis JSON ──");
+
+            Assert.Contains("RUN_URL=$(jq -r '.html_url // \"\"' ci-failure-data/run.json)", publisher, StringComparison.Ordinal);
+            Assert.Contains("ANALYZED_AT=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")", publisher, StringComparison.Ordinal);
+            Assert.Contains("FIRST_JOB=$(jq -r '.[0].name // \"unknown\"' \"$TRUSTED_FAILED_JOBS_FILE\")", publisher, StringComparison.Ordinal);
+            Assert.Contains("FAILED_SHA=$(jq -r '.head_sha // \"unknown\"' \"$RUN_CONTEXT_FILE\")", publisher, StringComparison.Ordinal);
+            Assert.Contains("LAST_SUCCESSFUL_SHA=$(jq -r '.head_sha // \"unknown\"' ci-failure-data/last-successful-main-run.json)", publisher, StringComparison.Ordinal);
+            Assert.Contains("TRIGGERING_MERGE=$(jq -r 'if .number then \"#\\(.number) \\(.title)\" else \"Not found\" end' ci-failure-data/triggering-merge-pr.json)", publisher, StringComparison.Ordinal);
+            Assert.Contains("($new | del(.occurrences, .issue_url))", publisher, StringComparison.Ordinal);
+            Assert.Contains("if $ex.issue_url then {issue_url: $ex.issue_url} else {} end", publisher, StringComparison.Ordinal);
+            var causeTypeIndex = publisher.IndexOf("CAUSE_TYPE=$(jq -r '.type' \"$CAUSE_FILE\")", StringComparison.Ordinal);
+            var currentCauseTypeIndex = publisher.IndexOf("CURRENT_CAUSE_TYPE=$(jq -r '.type // \"\"' \"$EXISTING\")", StringComparison.Ordinal);
+            Assert.True(causeTypeIndex >= 0 && causeTypeIndex < currentCauseTypeIndex);
+            Assert.Contains("\"$STORED_ISSUE_URL\" =~ ^https://github\\.com/${REPO}/issues/([0-9]+)$", publisher, StringComparison.Ordinal);
+            Assert.Contains(".pull_request == null", publisher, StringComparison.Ordinal);
+            Assert.Contains("any(.labels[]?; .name == \"ci-failure-cause\")", publisher, StringComparison.Ordinal);
+            Assert.Contains("TYPE_MARKER=\"<!-- ci-failure-cause-type:${CAUSE_TYPE} -->\"", publisher, StringComparison.Ordinal);
+            Assert.Contains("map(rtrimstr(\"\\r\"))", publisher, StringComparison.Ordinal);
+            Assert.Contains("$lines[0] == $marker", publisher, StringComparison.Ordinal);
+            Assert.Contains("$lines[1] == $type_marker", publisher, StringComparison.Ordinal);
+            Assert.Contains("[\"**Type**: \" + $cause_type]", publisher, StringComparison.Ordinal);
+            Assert.True(
+                publisher.IndexOf("git -C memory-repo push origin \"HEAD:$MEMORY_BRANCH\"", StringComparison.Ordinal) <
+                publisher.IndexOf("# ── 2. Create or update issues for each cause ──", StringComparison.Ordinal));
+            Assert.Contains("jq -r --arg run_url \"$RUN_URL\"", workflow, StringComparison.Ordinal);
+            Assert.Contains(".user.login == \\\"github-actions[bot]\\\"", workflow, StringComparison.Ordinal);
+            Assert.Contains("startswith(\\\"${MARKER}\\\\n\\\")", workflow, StringComparison.Ordinal);
+        });
     }
 
     [Fact]
@@ -124,10 +173,12 @@ public sealed class AnalyzeCiFailureWorkflowTests
         ForEachExecutableWorkflow(workflow =>
         {
             Assert.Contains("const trustedRunId = Number(runContext.run_id);", workflow, StringComparison.Ordinal);
+            Assert.Contains("const trustedRunAttempt = Number(runContext.run_attempt);", workflow, StringComparison.Ordinal);
             Assert.Contains("requestedRunId !== trustedRunId", workflow, StringComparison.Ordinal);
             Assert.Contains("analysis.verdict !== 'transient-infra'", workflow, StringComparison.Ordinal);
             Assert.Contains("if (trustedRunScope === 'pull-request')", workflow, StringComparison.Ordinal);
             Assert.Contains("run_id: trustedRunId", workflow, StringComparison.Ordinal);
+            Assert.Contains("currentRun.run_attempt !== trustedRunAttempt", workflow, StringComparison.Ordinal);
 
             var rerunValidation = GetSection(
                 workflow,
