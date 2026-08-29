@@ -426,32 +426,7 @@ public class InteractionsProvider : ComponentBase, IAsyncDisposable
                                 },
                                 MapMessageIntent(notification.Intent),
                                 DashboardUIHelpers.MessageBarSection,
-                                async result =>
-                                {
-                                    // Only send complete notification if in the open message bars list.
-                                    if (_openMessageBars.TryGetValue(item.InteractionId, out var openMessageBar))
-                                    {
-                                        var request = new WatchInteractionsRequestUpdate
-                                        {
-                                            InteractionId = item.InteractionId
-                                        };
-
-                                        if (result.Data is not bool actionResult)
-                                        {
-                                            request.Complete = new InteractionComplete();
-                                        }
-                                        else
-                                        {
-                                            notification.Result = actionResult;
-                                            request.Notification = notification;
-                                        }
-
-                                        _openMessageBars.Remove(item.InteractionId);
-                                        openMessageBar.Dispose();
-
-                                        await DashboardClient.SendInteractionRequestAsync(request, _cts.Token).ConfigureAwait(false);
-                                    }
-                                });
+                                result => HandleNotificationResultAsync(item, notification, result));
                         });
 
                         Debug.Assert(message != null, "Message should have been created in UI thread.");
@@ -500,6 +475,38 @@ public class InteractionsProvider : ComponentBase, IAsyncDisposable
                 _semaphore.Release();
             }
         }
+    }
+
+    private Task HandleNotificationResultAsync(WatchInteractionsResponseUpdate interaction, InteractionNotification notification, MessageBarResult result)
+    {
+        // Notification completion can run outside the Blazor renderer dispatcher. Marshal back
+        // before accessing component-owned state that the interaction watcher also updates.
+        return InvokeAsync(async () =>
+        {
+            // Only send complete notification if in the open message bars list.
+            if (_openMessageBars.TryGetValue(interaction.InteractionId, out var openMessageBar))
+            {
+                var request = new WatchInteractionsRequestUpdate
+                {
+                    InteractionId = interaction.InteractionId
+                };
+
+                if (result.Data is not bool actionResult)
+                {
+                    request.Complete = new InteractionComplete();
+                }
+                else
+                {
+                    notification.Result = actionResult;
+                    request.Notification = notification;
+                }
+
+                _openMessageBars.Remove(interaction.InteractionId);
+                openMessageBar.Dispose();
+
+                await DashboardClient.SendInteractionRequestAsync(request, _cts.Token).ConfigureAwait(false);
+            }
+        });
     }
 
     private static MessageIntentUI MapMessageIntent(MessageIntentDto intent)

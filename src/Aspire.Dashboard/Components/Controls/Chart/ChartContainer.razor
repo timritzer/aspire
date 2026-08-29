@@ -33,27 +33,23 @@ else
         <FluentTabs ActiveTabId="@($"tab-{_activeView}")" ActiveTabChanged="@OnTabChangeAsync" Size="null">
             <FluentTab HeaderClass="tab-label"
                        Id="@($"tab-{Metrics.MetricViewKind.Graph}")"
+                       DeferredLoading="true"
                        aria-label="@Loc[nameof(ControlsStrings.ChartContainerGraphAccessibleLabel)]"
                        Header="@Loc[nameof(ControlsStrings.ChartContainerGraphTab)]"
                        IconStart="@(new Icons.Regular.Size24.DataArea())">
                 <div class="metrics-chart-container metric-tab">
-                    @if (_activeView == Metrics.MetricViewKind.Graph)
-                    {
-                        <PlotlyChart InstrumentViewModel="_instrumentViewModel" Duration="Duration" Resources="Resources" DataEndTime="_dataEndTime" />
-                        <ChartFilters InstrumentType="_instrument.Summary.Type" ShowCount="_instrumentViewModel.ShowCount" ShowCountChanged="ShowCountChangedAsync" DimensionFilters="@DimensionFilters" OnDimensionValuesChanged="DimensionValuesChangedAsync" />
-                    }
+                    <PlotlyChart InstrumentViewModel="_instrumentViewModel" Duration="Duration" Resources="Resources" DataEndTime="_dataEndTime" />
+                    <ChartFilters InstrumentType="_instrument.Summary.Type" ShowCount="_instrumentViewModel.ShowCount" ShowCountChanged="ShowCountChangedAsync" DimensionFilters="@DimensionFilters" OnDimensionValuesChanged="DimensionValuesChangedAsync" />
                 </div>
             </FluentTab>
             <FluentTab HeaderClass="tab-label"
                        Id="@($"tab-{Metrics.MetricViewKind.Table}")"
+                       DeferredLoading="true"
                        Header="@Loc[nameof(ControlsStrings.ChartContainerTableTab)]"
                        IconStart="@(new Icons.Regular.Size24.Table())">
                 <div class="metrics-chart-container metric-tab">
-                    @if (_activeView == Metrics.MetricViewKind.Table)
-                    {
-                        <MetricTable InstrumentViewModel="_instrumentViewModel" Duration="Duration" Resources="Resources" DataEndTime="_dataEndTime" />
-                        <ChartFilters InstrumentType="_instrument.Summary.Type" ShowCount="_instrumentViewModel.ShowCount" ShowCountChanged="ShowCountChangedAsync" DimensionFilters="@DimensionFilters" OnDimensionValuesChanged="DimensionValuesChangedAsync" />
-                    }
+                    <MetricTable InstrumentViewModel="_instrumentViewModel" Duration="Duration" Resources="Resources" DataEndTime="_dataEndTime" />
+                    <ChartFilters InstrumentType="_instrument.Summary.Type" ShowCount="_instrumentViewModel.ShowCount" ShowCountChanged="ShowCountChangedAsync" DimensionFilters="@DimensionFilters" OnDimensionValuesChanged="DimensionValuesChangedAsync" />
                 </div>
             </FluentTab>
         </FluentTabs>
