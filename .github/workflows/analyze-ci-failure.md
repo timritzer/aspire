@@ -606,11 +606,14 @@ safe-outputs:
       env:
         GH_TOKEN: ${{ github.token }}
       steps:
-        - name: Checkout validation helper
+        - name: Checkout workflow helpers
           uses: actions/checkout@v4.3.1
           with:
             persist-credentials: false
-            sparse-checkout: .github/workflows/analyze-ci-failure-validation.sh
+            sparse-checkout: |
+              .github/workflows/analyze-ci-failure-cause-resolver.js
+              .github/workflows/analyze-ci-failure-validation.sh
+              eng/test-retry-patterns.json
             sparse-checkout-cone-mode: false
         - uses: actions/download-artifact@v4
           with:

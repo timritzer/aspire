@@ -117,11 +117,14 @@ if [ -d "$CAUSES_DIR" ]; then
     CAUSE_BASENAME=$(basename "$CAUSE_FILE")
     if ! jq -e '
       (type == "object") and
-      ((keys - ["error_pattern", "id", "test_name", "title", "type"]) | length == 0) and
+      ((keys - ["error_pattern", "id", "job_ids", "test_name", "title", "type"]) | length == 0) and
       ((.id | type) == "string") and
       ((.type | type) == "string") and
       ((.title | type) == "string") and
       ((.error_pattern | type) == "string") and
+      ((.job_ids | type) == "array") and
+      ((.job_ids | length) > 0) and
+      all(.job_ids[]; type == "number") and
       ((.test_name // "") | type == "string")
     ' "$CAUSE_FILE" >/dev/null; then
       echo "::error::Cause ${CAUSE_BASENAME} contains unsupported or publisher-owned fields"
