@@ -650,6 +650,13 @@ fluent-dialog-body.page-dialog-body > [slot="action"] fluent-button::part(contro
     font-weight: var(--fontWeightRegular);
 }
 
+.interaction-dialog-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
 fluent-dialog-body.help-dialog-body > div:not([slot]) > a {
     display: inline-flex;
     align-items: center;

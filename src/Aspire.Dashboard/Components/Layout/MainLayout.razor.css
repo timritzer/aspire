@@ -70,6 +70,7 @@
     background-color: var(--colorNeutralBackgroundInverted);
     color: var(--colorNeutralForegroundInverted);
     font-weight: var(--fontWeightRegular);
+    pointer-events: none;
 }
 
 ::deep.layout > .messagebar-container > .top-messagebar {

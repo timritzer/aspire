@@ -308,10 +308,6 @@ fluent-field.aspire-checkbox:has(> fluent-checkbox[disabled]) {
     opacity: 0.3;
 }
 
-fluent-field.aspire-checkbox > [slot="label"] {
-    padding-inline-start: 10px;
-}
-
 .aspire-checkbox:not(fluent-field),
 fluent-field.aspire-checkbox > fluent-checkbox {
     width: 18px;
