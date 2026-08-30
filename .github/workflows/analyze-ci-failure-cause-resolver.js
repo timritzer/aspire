@@ -59,7 +59,12 @@ function resolveCauses({
                 ? findPriorCauseByTestName(cause, priorCauses, priorById)
                 : undefined;
             retryPatternMatch = cause.type === 'infra-failure'
-                ? findPriorCauseByRetryPattern(evidence, jobNames, retryPatterns, priorById)
+                ? findPriorCauseByRetryPattern(
+                    evidence,
+                    jobNames,
+                    retryPatterns,
+                    priorById,
+                    priorByNormalizedId)
                 : undefined;
             explicitMatcherMatch = findPriorCauseByExplicitMatcher(evidence, priorCauses, priorById);
             const crossMechanismMatches = uniqueById(
@@ -424,7 +429,12 @@ function findPriorCauseByTestName(cause, priorCauses, priorById) {
         priorById);
 }
 
-function findPriorCauseByRetryPattern(evidence, jobNames, retryPatterns, priorById) {
+function findPriorCauseByRetryPattern(
+    evidence,
+    jobNames,
+    retryPatterns,
+    priorById,
+    priorByNormalizedId) {
     const matchingCauseIds = unique((retryPatterns.jobFailurePatterns ?? [])
         .filter(pattern => pattern.enabled !== false)
         .filter(pattern => pattern.causeId)
@@ -442,7 +452,7 @@ function findPriorCauseByRetryPattern(evidence, jobNames, retryPatterns, priorBy
     }
 
     const causeId = matchingCauseIds[0];
-    const priorCause = priorById.get(causeId);
+    const priorCause = findPriorCauseById(causeId, priorById, priorByNormalizedId);
     return priorCause ? resolveAlias(priorCause, priorById) : { id: causeId };
 }
 

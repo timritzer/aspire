@@ -1566,6 +1566,40 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
 
     [Fact]
     [RequiresTools(["node"])]
+    public async Task RetryPatternMigratesNormalizedLegacyCause()
+    {
+        const string legacyCauseId = "Windows Process Init Failure 0xC0000142";
+        const string canonicalCauseId = "windows-process-init-failure-0xc0000142";
+        const string issueUrl = "https://github.com/microsoft/aspire/issues/42";
+        JsonElement result = await ResolveAsync(CreateRetryPatternPayload(
+            "agent-proposed-cause",
+            new
+            {
+                output = "Shared retry token",
+                causeId = canonicalCauseId
+            },
+            [
+                new
+                {
+                    id = legacyCauseId,
+                    type = "infra-failure",
+                    title = "Stored legacy cause",
+                    error_pattern = "Legacy infrastructure failure",
+                    issue_url = issueUrl
+                }
+            ]));
+
+        JsonElement cause = FindOnlyCause(result);
+        Assert.Equal(canonicalCauseId, cause.GetProperty("id").GetString());
+        Assert.Equal(issueUrl, cause.GetProperty("issue_url").GetString());
+        Assert.Equal([legacyCauseId], ReadStrings(cause, "aliases"));
+        JsonElement migration = Assert.Single(result.GetProperty("priorCauseMigrations").EnumerateArray());
+        Assert.Equal(legacyCauseId, migration.GetProperty("legacy_id").GetString());
+        Assert.Equal(canonicalCauseId, migration.GetProperty("canonical_id").GetString());
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
     public async Task JobRetryPatternCannotBeClaimedByFlakyCauseBeforeInfraCause()
     {
         const string canonicalCauseId = "windows-process-init-failure-0xc0000142";
@@ -2485,7 +2519,10 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
             error_pattern = "Legacy infrastructure failure"
         };
 
-    private static object CreateRetryPatternPayload(string causeId, object retryPattern)
+    private static object CreateRetryPatternPayload(
+        string causeId,
+        object retryPattern,
+        object[]? priorCauses = null)
         => new
         {
             analysis = new
@@ -2514,7 +2551,7 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
                     job_ids = new[] { 1 }
                 }
             },
-            priorCauses = Array.Empty<object>(),
+            priorCauses = priorCauses ?? [],
             retryPatterns = new { jobFailurePatterns = new[] { retryPattern } }
         };
 

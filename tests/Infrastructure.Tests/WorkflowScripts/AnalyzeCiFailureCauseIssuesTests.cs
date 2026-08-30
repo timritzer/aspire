@@ -130,6 +130,44 @@ public sealed class AnalyzeCiFailureCauseIssuesTests : IDisposable
 
     [Fact]
     [RequiresTools(["node"])]
+    public async Task ReplayingExistingOccurrenceDoesNotReopenClosedIssue()
+    {
+        var result = await InvokeHarnessAsync<PublishResult>(
+            "publishCauseIssues",
+            new
+            {
+                workspace = _workspace.Path,
+                cause = CreateCause(),
+                issues = new[]
+                {
+                    new
+                    {
+                        number = 10,
+                        state = "closed",
+                        body = """
+                            <!-- ci-failure-cause:worker-crash -->
+                            <!-- ci-failure-cause-type:infra-failure -->
+
+                            ## Occurrences
+
+                            | Date | Build | Job | Context |
+                            |------|-------|-----|----|
+                            | 2026-08-29 | [991](https://github.com/microsoft/aspire/actions/runs/991) | Build / Windows | #19804 |
+
+                            """
+                    }
+                }
+            });
+
+        Assert.True(result.Publish.Skipped);
+        var issue = Assert.Single(result.Issues);
+        Assert.Equal("closed", issue.State);
+        Assert.Equal(1, issue.Body.Split("[991](", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("update", result.Calls);
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
     public async Task PublishReusesIssueWithCanonicalCauseAlias()
     {
         var result = await InvokeHarnessAsync<PublishResult>(
