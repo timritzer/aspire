@@ -104,10 +104,23 @@ function planIssueReconciliation({
     title,
     buildBody,
     closeDuplicates = false,
+    createIfMissing = true,
+    forceCreate = false,
     isMatchingIssue = () => true,
     reopen = 'when-changing',
     actionsForCanonical = () => [],
 }) {
+    if (forceCreate) {
+        const body = buildBody();
+        return {
+            canonicalIssueNumber: null,
+            created: true,
+            requiresRelist: false,
+            matches: [],
+            actions: [{ type: 'create', title, body, labels: [...new Set([label, ...(labels ?? [])])] }],
+        };
+    }
+
     const matches = findIssuesForMarkers(
         issues,
         [marker, ...alternateMarkers],
@@ -116,6 +129,16 @@ function planIssueReconciliation({
     const issueLabels = [...new Set([label, ...(labels ?? [])])];
 
     if (matches.length === 0) {
+        if (!createIfMissing) {
+            return {
+                canonicalIssueNumber: null,
+                created: false,
+                requiresRelist: false,
+                matches: [],
+                actions: [],
+            };
+        }
+
         const body = buildBody();
         const syntheticIssue = {
             number: null,
@@ -371,6 +394,7 @@ async function hasCommentForRun(github, owner, repo, issueNumber, marker) {
 function createOctokitIssueTransport(github, context) {
     const { owner, repo } = context.repo;
     return {
+        ensureLabel: definition => ensureLabel(github, owner, repo, definition),
         listIssues: label => listIssuesByLabel(github, owner, repo, label),
         createIssue: request => createIssue(github, owner, repo, request),
         updateIssue: (issueNumber, patch) => updateIssue(
@@ -384,9 +408,63 @@ function createOctokitIssueTransport(github, context) {
     };
 }
 
-async function recordRun(
-    github,
-    context,
+function createDryRunIssueTransport(sourceTransport, issues, onAction = () => {}) {
+    const inventory = (issues ?? []).map(issue => ({
+        ...issue,
+        labels: [...(issue.labels ?? [])],
+        comments: issue.comments ? [...issue.comments] : undefined,
+    }));
+    let nextSyntheticIssueNumber = 0;
+
+    const findIssue = issueNumber => inventory.find(issue => issue.number === issueNumber);
+    return {
+        ensureLabel: async definition => {
+            onAction({ type: 'ensure-label', ...definition });
+        },
+        listIssues: async () => inventory,
+        createIssue: async request => {
+            const issue = {
+                number: nextSyntheticIssueNumber--,
+                state: 'open',
+                comments: [],
+                ...request,
+            };
+            inventory.push(issue);
+            onAction({ type: 'create', issueNumber: issue.number, ...request });
+            return issue;
+        },
+        updateIssue: async (issueNumber, patch) => {
+            Object.assign(findIssue(issueNumber), patch);
+            onAction({ type: 'update', issueNumber, ...patch });
+        },
+        addComment: async (issueNumber, body) => {
+            const issue = findIssue(issueNumber);
+            (issue.comments ??= []).push(body);
+            onAction({ type: 'comment', issueNumber, body });
+        },
+        closeIssue: async (issueNumber, { stateReason = 'completed' } = {}) => {
+            const issue = findIssue(issueNumber);
+            issue.state = 'closed';
+            issue.state_reason = stateReason;
+            onAction({ type: 'close', issueNumber, stateReason });
+        },
+        reopenIssue: async issueNumber => {
+            findIssue(issueNumber).state = 'open';
+            onAction({ type: 'reopen', issueNumber });
+        },
+        listComments: async issueNumber => {
+            const issue = findIssue(issueNumber);
+            if (issue.comments === undefined) {
+                issue.comments = await sourceTransport.listComments(issueNumber);
+            }
+            return issue.comments;
+        },
+        issues: inventory,
+    };
+}
+
+async function reconcileRun(
+    transport,
     core,
     {
         label,
@@ -401,7 +479,6 @@ async function recordRun(
         closeDuplicates = false,
         isMatchingIssue = () => true,
     }) {
-    const transport = createOctokitIssueTransport(github, context);
     const occurrenceMarker = runMarker(runId);
     const commentBody = `${comment}\n\n${occurrenceMarker}`;
     const prepareIssues = async inventory => {
@@ -463,7 +540,13 @@ async function recordRun(
         skipped: !recorded,
         reopened: result.reopened,
         duplicatesClosed: result.duplicatesClosed,
+        appliedActions: result.appliedActions,
+        plan: result.plan,
     };
+}
+
+async function recordRun(github, context, core, options) {
+    return await reconcileRun(createOctokitIssueTransport(github, context), core, options);
 }
 
 module.exports = {
@@ -479,6 +562,7 @@ module.exports = {
     planIssueReconciliation,
     executeIssueReconciliation,
     createOctokitIssueTransport,
+    createDryRunIssueTransport,
     ensureLabel,
     listIssuesByLabel,
     listOpenIssuesByLabel,
@@ -488,5 +572,6 @@ module.exports = {
     closeIssue,
     reopenIssue,
     hasCommentForRun,
+    reconcileRun,
     recordRun,
 };
