@@ -140,6 +140,9 @@ async function dispatch(operation, payload) {
                     if (payload.comment !== undefined) {
                         actions.push({ type: 'comment', body: payload.comment });
                     }
+                    if (payload.closeCanonical === true) {
+                        actions.push({ type: 'close', stateReason: 'completed' });
+                    }
                     return actions;
                 },
             };
@@ -153,6 +156,7 @@ async function dispatch(operation, payload) {
             return {
                 plan,
                 appliedActions: execution.appliedActions,
+                duplicatesClosed: execution.duplicatesClosed,
             };
         }
 
