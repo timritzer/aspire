@@ -1307,7 +1307,7 @@ Analyze all of the data to classify each failed job (see **Classification Rules*
 
 When a failure is classified as `flaky-test`, `infra-failure`, or `main-repository-breakage` (NOT pull-request `code-issue`), check the **Prior Causes** section in the summary for a match. Prior causes are loaded from JSON files in the `ci-failure-data/prior-causes/` directory (one file per cause, e.g. `ci-failure-data/prior-causes/nuget-feed-timeout.json`). These files are fetched by the `collect-data` job from the `memory/ci-failure-analysis` branch's `causes/` directory and rendered into the summary under the "Prior Causes (from memory branch)" heading.
 
-If any of this run's transient failures match an existing cause, you MUST reuse that cause's `id` when writing the cause file in Step 3b. This allows the publish job to merge occurrences into the existing cause rather than creating duplicates. Do NOT attempt to match code-issue failures against prior causes — those are not tracked.
+If any of this run's tracked failures match an existing cause, you MUST reuse that cause's `id` when writing the cause file in Step 3b. This allows the publish job to merge occurrences into the existing cause rather than creating duplicates. Do NOT attempt to match code-issue failures against prior causes — those are not tracked.
 
 A failure matches an existing cause when:
 - For flaky tests: the failing test name matches `test_name` in a prior cause, OR the error message/stack trace substantially matches the `error_pattern`
@@ -1371,7 +1371,7 @@ Write the run summary to `/tmp/gh-aw/agent/analysis-result.json`. The JSON must 
 Field details:
 - `run_scope`: Copy the immutable run scope from the summary exactly.
 - `verdict`: The overall classification. Use `"transient-infra"` when every failed job is an infrastructure issue, `"flaky-test"` when at least one failed job is a flaky test and every failed job is transient, `"code-issue"` when every failed job is caused by pull request changes, `"main-repository-breakage"` when every failed job is a deterministic repository failure on main, or `"mixed"` when transient and non-transient failures occur together.
-- `pr`: For pull-request scope, include the subject PR object. For main scope, this MUST be `null`.
+- `pr`: For pull-request scope, include the subject PR object when the summary provides one; otherwise use `null`. For main scope, this MUST be `null`.
 - `triggering_merge_pr`: For main scope, include the triggering merge PR from the summary when available. It is non-causal context and MUST NOT be copied to `pr`. For pull-request scope, this is `null`.
 - `main_context`: For main scope, include `last_successful_main_sha`, `failed_sha`, and `candidate_merges` from the summary. For pull-request scope, this is `null`.
 - `failed_jobs[].classification`: Per-job classification — one of `"transient-infra"`, `"flaky-test"`, `"code-issue"`, or `"main-repository-breakage"`.
@@ -1450,7 +1450,7 @@ The failure was caused by infrastructure issues outside the PR author's control.
 
 ### 2. Transient Test Failure (Flaky Test)
 
-A test failed, but the failure is NOT related to PR changes. Indicators:
+A test failed transiently rather than because repository code changed. PR-file relationships are indicators only for pull-request scope; main-scope `flaky-test` classification requires independent transient evidence. Indicators:
 - The test failure message matches a known transient pattern from `eng/test-retry-patterns.json`
 - The failing test is in a code area NOT modified by the PR (check the PR changed files)
 - The failure shows intermittent/timing-related errors (race conditions, port conflicts, timeout in integration tests)

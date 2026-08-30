@@ -28,6 +28,30 @@ if [ "$TRUSTED_RUN_SCOPE" = "main" ] && [ "$(jq -r '.pr // null' "$ANALYSIS_FILE
   echo "::error::Main run analysis must not identify a subject PR"
   exit 1
 fi
+if [ "$TRUSTED_RUN_SCOPE" = "pull-request" ]; then
+  TRUSTED_PR_NUMBERS=$(jq -r '.pr_numbers // ""' "$RUN_CONTEXT_FILE")
+  ANALYSIS_PR_NUMBER=$(jq -r '
+    if ((.pr | type) == "object") and ((.pr.number | type) == "number")
+    then (.pr.number | tostring)
+    else ""
+    end
+  ' "$ANALYSIS_FILE")
+  ANALYSIS_PR_IS_NULL=$(jq -r 'has("pr") and (.pr == null)' "$ANALYSIS_FILE")
+  if [ "$ANALYSIS_PR_IS_NULL" = "true" ]; then
+    :
+  elif [ -z "$TRUSTED_PR_NUMBERS" ] || [ -z "$ANALYSIS_PR_NUMBER" ]; then
+    echo "::error::Pull request analysis must identify a trusted subject PR"
+    exit 1
+  else
+    case ",${TRUSTED_PR_NUMBERS}," in
+      *",${ANALYSIS_PR_NUMBER},"*) ;;
+      *)
+        echo "::error::Pull request analysis must identify a trusted subject PR"
+        exit 1
+        ;;
+    esac
+  fi
+fi
 if ! jq -e '
   (.failed_jobs | type == "array") and
   all(.failed_jobs[]; (.id | type) == "number") and

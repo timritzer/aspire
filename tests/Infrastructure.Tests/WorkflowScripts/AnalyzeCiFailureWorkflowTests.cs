@@ -101,15 +101,25 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
         "[]",
         "::error::Main run analysis must not identify a subject PR")]
     [InlineData(
-        """{"run_id":123,"run_scope":"pull-request","verdict":"code-issue","pr":42,"failed_jobs":[{"id":456,"classification":"code-issue"}],"causes":[]}""",
-        """{"run_id":123,"run_scope":"pull-request"}""",
+        """{"run_id":123,"run_scope":"pull-request","verdict":"code-issue","pr":{"number":42},"failed_jobs":[{"id":456,"classification":"code-issue"}],"causes":[]}""",
+        """{"run_id":123,"run_scope":"pull-request","pr_numbers":"42"}""",
         """[{"id":123,"name":"Tests"}]""",
         "::error::Analysis failed-job IDs do not match the trusted failed jobs")]
     [InlineData(
-        """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":42,"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":[]}""",
-        """{"run_id":123,"run_scope":"pull-request"}""",
+        """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":{"number":42},"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":[]}""",
+        """{"run_id":123,"run_scope":"pull-request","pr_numbers":"42"}""",
         """[{"id":123,"name":"Tests"}]""",
         "::error::A transient-infra verdict requires every failed job and cause to be an infrastructure failure")]
+    [InlineData(
+        """{"run_id":123,"run_scope":"pull-request","verdict":"code-issue","pr":{"number":999},"failed_jobs":[{"id":123,"classification":"code-issue"}],"causes":[]}""",
+        """{"run_id":123,"run_scope":"pull-request","pr_numbers":"42"}""",
+        """[{"id":123,"name":"Tests"}]""",
+        "::error::Pull request analysis must identify a trusted subject PR")]
+    [InlineData(
+        """{"run_id":123,"run_scope":"pull-request","verdict":"code-issue","pr":{},"failed_jobs":[{"id":123,"classification":"code-issue"}],"causes":[]}""",
+        """{"run_id":123,"run_scope":"pull-request","pr_numbers":""}""",
+        """[{"id":123,"name":"Tests"}]""",
+        "::error::Pull request analysis must identify a trusted subject PR")]
     [RequiresTools(["bash", "jq"])]
     public async Task AnalysisValidatorRejectsUntrustedAssociations(
         string analysis,
@@ -123,6 +133,46 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Contains(expectedError, result.Output, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(
+        """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":{"number":42},"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":["nuget-timeout"]}""",
+        """{"run_id":123,"run_scope":"pull-request","pr_numbers":"42"}""",
+        "nuget-timeout.json",
+        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out"}""")]
+    [InlineData(
+        """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":null,"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":["nuget-timeout"]}""",
+        """{"run_id":123,"run_scope":"pull-request","pr_numbers":"42"}""",
+        "nuget-timeout.json",
+        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out"}""")]
+    [InlineData(
+        """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":null,"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":["nuget-timeout"]}""",
+        """{"run_id":123,"run_scope":"pull-request","pr_numbers":""}""",
+        "nuget-timeout.json",
+        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out"}""")]
+    [InlineData(
+        """{"run_id":123,"run_scope":"main","verdict":"main-repository-breakage","pr":null,"failed_jobs":[{"id":123,"classification":"main-repository-breakage"}],"causes":["main-build-break"]}""",
+        """{"run_id":123,"run_scope":"main","pr_numbers":""}""",
+        "main-build-break.json",
+        """{"id":"main-build-break","type":"main-repository-breakage","title":"Main build break","error_pattern":"Compilation failed"}""")]
+    [RequiresTools(["bash", "jq"])]
+    public async Task AnalysisValidatorAcceptsValidResults(
+        string analysis,
+        string runContext,
+        string causeFileName,
+        string cause)
+    {
+        await WriteValidationFixtureAsync(
+            analysis,
+            runContext,
+            """[{"id":123,"name":"Tests"}]""",
+            causeFileName,
+            cause);
+
+        var result = await RunValidationScriptAsync(Path.Combine(_workspace.Path, "output.json"));
+
+        Assert.Equal(0, result.ExitCode);
     }
 
     [Fact]
@@ -167,6 +217,7 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
         Assert.Contains("ANALYSIS_RUN_SCOPE=$(jq -r '.run_scope' \"$ANALYSIS_FILE\")", validationScript, StringComparison.Ordinal);
         Assert.Contains("Analysis result does not match trusted run context\"\nexit 1", validationScript, StringComparison.Ordinal);
         Assert.Contains("Main run analysis must not identify a subject PR\"\nexit 1", validationScript, StringComparison.Ordinal);
+        Assert.Contains("Pull request analysis must identify a trusted subject PR\"\nexit 1", validationScript, StringComparison.Ordinal);
         Assert.Contains("TRUSTED_FAILED_JOBS_FILE=\"ci-failure-data/failed-jobs.json\"", validationScript, StringComparison.Ordinal);
         Assert.Contains("Analysis must contain numeric-ID failed_jobs and string-valued causes arrays\"\nexit 1", validationScript, StringComparison.Ordinal);
         Assert.Contains("Cause ${CAUSE_BASENAME} contains unsupported or publisher-owned fields\"\nexit 1", validationScript, StringComparison.Ordinal);
@@ -201,6 +252,18 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
             StringComparison.Ordinal);
         Assert.Contains(
             "`failed_jobs` MUST contain exactly one object for every failed job in the summary, using its exact numeric ID, with no additions, omissions, or duplicates.",
+            s_sourceWorkflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "If any of this run's tracked failures match an existing cause, you MUST reuse that cause's `id`",
+            s_sourceWorkflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "PR-file relationships are indicators only for pull-request scope; main-scope `flaky-test` classification requires independent transient evidence.",
+            s_sourceWorkflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "For pull-request scope, include the subject PR object when the summary provides one; otherwise use `null`.",
             s_sourceWorkflow,
             StringComparison.Ordinal);
     }
@@ -326,7 +389,12 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
         return new CommandResult(process.ExitCode, await stdoutTask + await stderrTask);
     }
 
-    private async Task WriteValidationFixtureAsync(string analysis, string runContext, string trustedFailedJobs)
+    private async Task WriteValidationFixtureAsync(
+        string analysis,
+        string runContext,
+        string trustedFailedJobs,
+        string? causeFileName = null,
+        string? cause = null)
     {
         var agentDirectory = Path.Combine(_workspace.Path, "agent");
         var failureDataDirectory = Path.Combine(_workspace.Path, "ci-failure-data");
@@ -336,6 +404,11 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
         await File.WriteAllTextAsync(Path.Combine(agentDirectory, "analysis-result.json"), analysis);
         await File.WriteAllTextAsync(Path.Combine(failureDataDirectory, "run-context.json"), runContext);
         await File.WriteAllTextAsync(Path.Combine(failureDataDirectory, "failed-jobs.json"), trustedFailedJobs);
+        if (causeFileName is not null && cause is not null)
+        {
+            var causesDirectory = Directory.CreateDirectory(Path.Combine(agentDirectory, "causes")).FullName;
+            await File.WriteAllTextAsync(Path.Combine(causesDirectory, causeFileName), cause);
+        }
     }
 
     private sealed record CommandResult(int ExitCode, string Output);
