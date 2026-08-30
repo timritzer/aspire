@@ -651,7 +651,9 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
             retryPatterns = new { jobFailurePatterns = Array.Empty<object>() }
         });
 
-        Assert.Equal(canonicalCauseId, FindOnlyCause(result).GetProperty("id").GetString());
+        JsonElement cause = FindOnlyCause(result);
+        Assert.Equal(canonicalCauseId, cause.GetProperty("id").GetString());
+        Assert.Equal([aliasCauseId], ReadStrings(cause, "aliases"));
     }
 
     [Fact]
@@ -1679,6 +1681,61 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
 
     [Fact]
     [RequiresTools(["node"])]
+    public async Task RejectsFlakyTestAssociationUsingAgentAuthoredJobName()
+    {
+        const string testName = "Aspire.Sample.Tests.SampleTests.FlakyTest";
+        CommandResult result = await ExecuteHarnessAsync(new
+        {
+            analysis = new
+            {
+                causes = new[] { "sample-flaky-test" },
+                failed_jobs = new[]
+                {
+                    new
+                    {
+                        id = 101,
+                        name = "Agent supplied job name",
+                        classification = "flaky-test",
+                        reason = "The sample test failed."
+                    }
+                },
+                failed_tests = new[]
+                {
+                    new
+                    {
+                        name = testName,
+                        job = "Agent supplied job name",
+                        error = "The sample test failed.",
+                        stack_trace = string.Empty
+                    }
+                }
+            },
+            trustedFailedJobs = new[]
+            {
+                new { id = 101, name = "Tests / Sample / Sample (windows-latest)" }
+            },
+            causes = new[]
+            {
+                new
+                {
+                    id = "sample-flaky-test",
+                    type = "flaky-test",
+                    title = "Sample flaky test",
+                    test_name = testName,
+                    error_pattern = "The sample test failed.",
+                    job_ids = new[] { 101 }
+                }
+            },
+            priorCauses = Array.Empty<object>(),
+            retryPatterns = new { jobFailurePatterns = Array.Empty<object>() }
+        });
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("is not in its referenced failed jobs", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
     public async Task UsesTrustedJobNamesForPersistedAttribution()
     {
         JsonElement result = await ResolveAsync(new
@@ -1859,6 +1916,25 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
         using JsonDocument alias = JsonDocument.Parse(
             await File.ReadAllTextAsync(Path.Combine(priorCausesDirectory, $"{proposedCauseId}.json")));
         Assert.Equal(canonicalCauseId, alias.RootElement.GetProperty("canonical_id").GetString());
+    }
+
+    [Theory]
+    [InlineData("cause--id")]
+    [InlineData("cause-")]
+    [RequiresTools(["node"])]
+    public async Task RejectsNonCanonicalRetryPatternCauseId(string causeId)
+    {
+        CommandResult result = await ExecuteHarnessAsync(CreateRetryPatternPayload(
+            "current-infra-cause",
+            new
+            {
+                output = "Shared retry token",
+                causeId,
+                enabled = true
+            }));
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("must be a safe cause ID", result.Output, StringComparison.Ordinal);
     }
 
     [Fact]

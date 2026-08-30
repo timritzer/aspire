@@ -141,22 +141,22 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
         """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":{"number":42},"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":["nuget-timeout"]}""",
         """{"run_id":123,"run_scope":"pull-request","pr_numbers":"42"}""",
         "nuget-timeout.json",
-        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out"}""")]
+        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out","job_ids":[123]}""")]
     [InlineData(
         """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":null,"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":["nuget-timeout"]}""",
         """{"run_id":123,"run_scope":"pull-request","pr_numbers":"42"}""",
         "nuget-timeout.json",
-        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out"}""")]
+        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out","job_ids":[123]}""")]
     [InlineData(
         """{"run_id":123,"run_scope":"pull-request","verdict":"transient-infra","pr":null,"failed_jobs":[{"id":123,"classification":"transient-infra"}],"causes":["nuget-timeout"]}""",
         """{"run_id":123,"run_scope":"pull-request","pr_numbers":""}""",
         "nuget-timeout.json",
-        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out"}""")]
+        """{"id":"nuget-timeout","type":"infra-failure","title":"NuGet timeout","error_pattern":"Request timed out","job_ids":[123]}""")]
     [InlineData(
         """{"run_id":123,"run_scope":"main","verdict":"main-repository-breakage","pr":null,"failed_jobs":[{"id":123,"classification":"main-repository-breakage"}],"causes":["main-build-break"]}""",
         """{"run_id":123,"run_scope":"main","pr_numbers":""}""",
         "main-build-break.json",
-        """{"id":"main-build-break","type":"main-repository-breakage","title":"Main build break","error_pattern":"Compilation failed"}""")]
+        """{"id":"main-build-break","type":"main-repository-breakage","title":"Main build break","error_pattern":"Compilation failed","job_ids":[123]}""")]
     [RequiresTools(["bash", "jq"])]
     public async Task AnalysisValidatorAcceptsValidResults(
         string analysis,

@@ -3,7 +3,7 @@ const path = require('node:path');
 
 const trackedClassifications = new Set(['flaky-test', 'transient-infra', 'main-repository-breakage']);
 const supportedCauseTypes = new Set(['flaky-test', 'infra-failure', 'main-repository-breakage']);
-const safeCauseIdPattern = /^[a-z0-9][a-z0-9-]*$/;
+const safeCauseIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function resolveCauses({
     analysis,
@@ -34,9 +34,9 @@ function resolveCauses({
     const priorCauseAliases = new Map();
 
     for (const cause of causes) {
-        const jobIds = resolveCauseJobIds(cause, analysis, failedJobsById);
+        const jobIds = resolveCauseJobIds(cause, analysis, failedJobsById, trustedFailedJobsById);
         const jobNames = jobIds.map(jobId => trustedFailedJobsById.get(jobId).name);
-        const evidence = buildEvidence(cause, analysis, jobIds);
+        const evidence = buildEvidence(cause, analysis, jobNames);
 
         const proposedPriorCause = findPriorCauseById(cause.id, priorById, priorByNormalizedId);
         const proposedCanonicalCause = proposedPriorCause
@@ -107,6 +107,7 @@ function resolveCauses({
         }
         const aliases = unique([
             ...(canonicalPriorCause?.aliases ?? []),
+            ...(proposedAlias && proposedPriorCause.id !== canonicalId ? [proposedPriorCause.id] : []),
             ...(priorCauseId && priorCauseId !== canonicalId ? [priorCauseId] : []),
             ...(supersededPriorCause
                 ? [supersededPriorCause.id, ...(supersededPriorCause.aliases ?? [])]
@@ -333,7 +334,7 @@ function getCanonicalCauseId(proposedCauseId, priorCauseId) {
     return safeCauseIdPattern.test(normalizedPriorCauseId) ? normalizedPriorCauseId : proposedCauseId;
 }
 
-function resolveCauseJobIds(cause, analysis, failedJobsById) {
+function resolveCauseJobIds(cause, analysis, failedJobsById, trustedFailedJobsById) {
     let jobIds = cause.job_ids;
 
     if (!Array.isArray(jobIds) || jobIds.length === 0) {
@@ -355,7 +356,7 @@ function resolveCauseJobIds(cause, analysis, failedJobsById) {
     if (cause.test_name) {
         const normalizedTestName = normalizeTestName(cause.test_name);
         const missingJobIds = jobIds.filter(jobId => {
-            const jobName = failedJobsById.get(jobId).name;
+            const jobName = trustedFailedJobsById.get(jobId).name;
             return !analysis.failed_tests.some(test =>
                 test.job === jobName && normalizeTestName(test.name) === normalizedTestName);
         });
@@ -368,12 +369,11 @@ function resolveCauseJobIds(cause, analysis, failedJobsById) {
     return jobIds;
 }
 
-function buildEvidence(cause, analysis, jobIds) {
-    const jobIdSet = new Set(jobIds);
-    const jobNames = new Set(analysis.failed_jobs.filter(job => jobIdSet.has(job.id)).map(job => job.name));
+function buildEvidence(cause, analysis, jobNames) {
+    const trustedJobNames = new Set(jobNames);
     const causeTestNames = new Set(cause.test_name ? [normalizeTestName(cause.test_name)] : []);
     const failedTests = analysis.failed_tests.filter(test =>
-        jobNames.has(test.job) && causeTestNames.has(normalizeTestName(test.name)));
+        trustedJobNames.has(test.job) && causeTestNames.has(normalizeTestName(test.name)));
 
     return [
         cause.title,
