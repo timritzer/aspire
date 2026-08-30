@@ -315,8 +315,12 @@ async function executeIssueReconciliation(transport, core, options) {
         }
     }
 
-    const canonicalIssueNumber = plan.canonicalIssueNumber ?? createdIssue?.number;
-    core.info(`Reconciled tracking issue #${canonicalIssueNumber}.`);
+    const canonicalIssueNumber = plan.canonicalIssueNumber ?? createdIssue?.number ?? null;
+    if (canonicalIssueNumber === null) {
+        core.info('No matching tracking issue to reconcile.');
+    } else {
+        core.info(`Reconciled tracking issue #${canonicalIssueNumber}.`);
+    }
     return {
         number: canonicalIssueNumber,
         created: createdIssue?.number === canonicalIssueNumber,
@@ -412,7 +416,7 @@ function createDryRunIssueTransport(sourceTransport, issues, onAction = () => {}
     const inventory = (issues ?? []).map(issue => ({
         ...issue,
         labels: [...(issue.labels ?? [])],
-        comments: issue.comments ? [...issue.comments] : undefined,
+        comments: Array.isArray(issue.comments) ? [...issue.comments] : undefined,
     }));
     let nextSyntheticIssueNumber = 0;
 
