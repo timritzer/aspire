@@ -963,6 +963,12 @@ safe-outputs:
           required: true
           type: string
       steps:
+        - name: Checkout rerun validator
+          uses: actions/checkout@v4.3.1
+          with:
+            persist-credentials: false
+            sparse-checkout: .github/workflows/analyze-ci-failure-cause-resolver.js
+            sparse-checkout-cone-mode: false
         - uses: actions/download-artifact@v4
           with:
             name: ci-failure-data
@@ -975,6 +981,8 @@ safe-outputs:
             script: |
               const fs = require('fs');
               const path = require('path');
+              const { validateCauseJobAttribution } =
+                require('./.github/workflows/analyze-ci-failure-cause-resolver.js');
 
               // Read inputs from the agent output artifact.
               // gh-aw writes { "items": [ { "type": "rerun_failed_jobs", ... } ] }.
@@ -1075,6 +1083,7 @@ safe-outputs:
                 core.setFailed('Rerun requires unique analysis cause IDs matching the generated cause files');
                 return;
               }
+              const rerunCauses = [];
               for (const causeFileName of causeFiles) {
                 let cause;
                 try {
@@ -1092,6 +1101,13 @@ safe-outputs:
                   core.setFailed(`Rerun cause ${causeFileName} must be a valid infra-failure cause`);
                   return;
                 }
+                rerunCauses.push(cause);
+              }
+              try {
+                validateCauseJobAttribution(analysis, rerunCauses, trustedFailedJobs);
+              } catch (error) {
+                core.setFailed(`Rerun cause attribution is invalid: ${error.message}`);
+                return;
               }
 
               if (!enableRerun) {
@@ -1264,6 +1280,7 @@ Field details:
 - `error_pattern`: The actual error message and relevant stack trace from the failure. For flaky tests, use the error message and first few stack trace frames from the TRX data. For infra failures, use the error text from the job logs. Include enough detail to identify and reproduce the issue (up to ~500 characters).
 - `job_ids`: Required array containing the numeric IDs of every failed job caused by this underlying failure. Use the IDs from `failed_jobs`; do not attribute a cause to an unrelated failed job.
 - The union of `job_ids` across all cause files MUST cover every failed job classified as `transient-infra`, `flaky-test`, or `main-repository-breakage`.
+- `infra-failure` causes may reference only `transient-infra` jobs, `flaky-test` causes only `flaky-test` jobs, and `main-repository-breakage` causes only `main-repository-breakage` jobs.
 
 Do NOT include an `occurrences` field — the publish job builds occurrences automatically from the run summary JSON.
 

@@ -112,10 +112,13 @@ public sealed class AnalyzeCiFailureCauseIssuesTests : IDisposable
         Assert.Equal("open", canonical.State);
         Assert.Equal(1, canonical.Body.Split("[991](", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("|\n\n|", canonical.Body, StringComparison.Ordinal);
+        Assert.Single(canonical.Comments);
 
         var duplicate = Assert.Single(result.Issues, issue => issue.Number == 20);
         Assert.Equal("closed", duplicate.State);
         Assert.Equal("not_planned", duplicate.StateReason);
+        Assert.Single(duplicate.Comments);
+        Assert.Contains("listComments", result.Calls);
 
         var wrongType = Assert.Single(result.Issues, issue => issue.Number == 5);
         Assert.Equal("open", wrongType.State);
@@ -258,6 +261,7 @@ public sealed class AnalyzeCiFailureCauseIssuesTests : IDisposable
 
     private sealed record PublishResult(
         PublishSummary Publish,
+        string[] Calls,
         IssueState[] Issues,
         JsonElement StoredCause);
 
@@ -269,5 +273,6 @@ public sealed class AnalyzeCiFailureCauseIssuesTests : IDisposable
         string? StateReason,
         string Title,
         string Body,
-        string[] Labels);
+        string[] Labels,
+        string[] Comments);
 }

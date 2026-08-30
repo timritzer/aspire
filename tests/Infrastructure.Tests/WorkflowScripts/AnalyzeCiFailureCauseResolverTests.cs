@@ -1506,6 +1506,33 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
 
     [Fact]
     [RequiresTools(["node"])]
+    public async Task RejectsAliasWhoseSourceIsAlsoCanonicalInCurrentBatch()
+    {
+        CommandResult result = await ExecuteHarnessAsync(CreateAliasCanonicalCollisionPayload());
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "cannot alias prior cause 'canonical-beta' because the current batch also resolves to it",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
+    public async Task RejectsAliasWhoseNormalizedSourceIsCanonicalInCurrentBatch()
+    {
+        CommandResult result = await ExecuteHarnessAsync(
+            CreateAliasCanonicalCollisionPayload("Canonical Beta"));
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "cannot alias prior cause 'Canonical Beta' because the current batch also resolves to 'canonical-beta'",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
     public async Task IgnoresDisabledRetryPatterns()
     {
         const string currentCauseId = "current-infra-cause";
@@ -1539,13 +1566,182 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
 
     [Fact]
     [RequiresTools(["node"])]
+    public async Task JobRetryPatternCannotBeClaimedByFlakyCauseBeforeInfraCause()
+    {
+        const string canonicalCauseId = "windows-process-init-failure-0xc0000142";
+        var retryPatterns = new
+        {
+            jobFailurePatterns = new[]
+            {
+                new
+                {
+                    jobName = new { regex = ".*windows.*" },
+                    output = "0xC0000142",
+                    causeId = canonicalCauseId
+                }
+            }
+        };
+        JsonElement firstRun = await ResolveAsync(new
+        {
+            analysis = new
+            {
+                causes = new[] { "flaky-worker-proposal" },
+                failed_jobs = new[]
+                {
+                    new
+                    {
+                        id = 1,
+                        name = "Tests / Worker (windows-latest)",
+                        classification = "flaky-test",
+                        reason = "Process completed with exit code -1073741502 (0xC0000142)"
+                    }
+                },
+                failed_tests = Array.Empty<object>()
+            },
+            causes = new[]
+            {
+                new
+                {
+                    id = "flaky-worker-proposal",
+                    type = "flaky-test",
+                    title = "Worker test failed",
+                    error_pattern = "Process completed with exit code -1073741502 (0xC0000142)",
+                    job_ids = new[] { 1 }
+                }
+            },
+            priorCauses = Array.Empty<object>(),
+            retryPatterns
+        });
+
+        Assert.Equal("flaky-worker-proposal", FindOnlyCause(firstRun).GetProperty("id").GetString());
+
+        JsonElement secondRun = await ResolveAsync(new
+        {
+            analysis = new
+            {
+                causes = new[] { "infra-worker-proposal" },
+                failed_jobs = new[]
+                {
+                    new
+                    {
+                        id = 2,
+                        name = "Build / Worker (windows-latest)",
+                        classification = "transient-infra",
+                        reason = "Process completed with exit code -1073741502 (0xC0000142)"
+                    }
+                },
+                failed_tests = Array.Empty<object>()
+            },
+            causes = new[]
+            {
+                new
+                {
+                    id = "infra-worker-proposal",
+                    type = "infra-failure",
+                    title = "Windows process initialization failed",
+                    error_pattern = "Process completed with exit code -1073741502 (0xC0000142)",
+                    job_ids = new[] { 2 }
+                }
+            },
+            priorCauses = firstRun.GetProperty("causes"),
+            retryPatterns
+        });
+
+        JsonElement infraCause = FindOnlyCause(secondRun);
+        Assert.Equal(canonicalCauseId, infraCause.GetProperty("id").GetString());
+        Assert.Equal("infra-failure", infraCause.GetProperty("type").GetString());
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
+    public async Task RerunAttributionRejectsMissingTrustedJobCoverage()
+    {
+        CommandResult result = await ExecuteHarnessAsync(
+            new
+            {
+                analysis = new
+                {
+                    failed_jobs = new[]
+                    {
+                        new { id = 1, classification = "transient-infra" },
+                        new { id = 2, classification = "transient-infra" }
+                    }
+                },
+                causes = new[]
+                {
+                    new
+                    {
+                        id = "first-infra-cause",
+                        type = "infra-failure",
+                        job_ids = new[] { 1 }
+                    }
+                },
+                trustedFailedJobs = new[]
+                {
+                    new { id = 1, name = "Build / Linux" },
+                    new { id = 2, name = "Build / Windows" }
+                }
+            },
+            "validateCauseJobAttribution");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("Tracked failed jobs are missing cause references: 2", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
+    public async Task RejectsCauseTypesAssignedToIncompatibleJobClassifications()
+    {
+        CommandResult result = await ExecuteHarnessAsync(
+            new
+            {
+                analysis = new
+                {
+                    failed_jobs = new[]
+                    {
+                        new { id = 1, classification = "transient-infra" },
+                        new { id = 2, classification = "main-repository-breakage" }
+                    }
+                },
+                causes = new object[]
+                {
+                    new
+                    {
+                        id = "infra-cause",
+                        type = "infra-failure",
+                        job_ids = new[] { 2 }
+                    },
+                    new
+                    {
+                        id = "main-breakage",
+                        type = "main-repository-breakage",
+                        job_ids = new[] { 1 }
+                    }
+                },
+                trustedFailedJobs = new[]
+                {
+                    new { id = 1, name = "Build / Linux" },
+                    new { id = 2, name = "Build / Windows" }
+                }
+            },
+            "validateCauseJobAttribution");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "Cause 'infra-cause' of type 'infra-failure' cannot reference job ID '2' classified as 'main-repository-breakage'.",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [RequiresTools(["node"])]
     public async Task RejectsCurrentCauseMergeAcrossTypes()
     {
         CommandResult result = await ExecuteHarnessAsync(new
         {
             analysis = new
             {
-                causes = new[] { "infra-proposal", "flaky-proposal" },
+                causes = new[] { "infra-proposal", "shared-canonical" },
                 failed_jobs = new object[]
                 {
                     new
@@ -1586,7 +1782,7 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
                 },
                 new
                 {
-                    id = "flaky-proposal",
+                    id = "shared-canonical",
                     type = "flaky-test",
                     title = "Flaky test",
                     test_name = "Aspire.Tests.Sample",
@@ -2004,6 +2200,50 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
         Assert.True(File.Exists(Path.Combine(causesDirectory, $"{proposedCauseId}.json")));
     }
 
+    [Theory]
+    [InlineData("canonical-beta")]
+    [InlineData("Canonical Beta")]
+    [RequiresTools(["node"])]
+    public async Task CommandLineLeavesCanonicalCauseUnchangedWhenAliasSourceCollides(string canonicalBetaId)
+    {
+        string analysisPath = Path.Combine(_workspace.Path, "collision-analysis-result.json");
+        string causesDirectory = Directory.CreateDirectory(Path.Combine(_workspace.Path, "collision-causes")).FullName;
+        string priorCausesDirectory = Directory.CreateDirectory(Path.Combine(_workspace.Path, "collision-prior-causes")).FullName;
+        string retryPatternsPath = Path.Combine(_workspace.Path, "collision-retry-patterns.json");
+        object payload = CreateAliasCanonicalCollisionPayload(canonicalBetaId);
+        using JsonDocument payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(payload, s_jsonOptions));
+        JsonElement root = payloadDocument.RootElement;
+
+        await WriteJsonAsync(analysisPath, root.GetProperty("analysis"));
+        foreach (JsonElement cause in root.GetProperty("causes").EnumerateArray())
+        {
+            string causeId = cause.GetProperty("id").GetString()!;
+            await WriteJsonAsync(Path.Combine(causesDirectory, $"{causeId}.json"), cause);
+        }
+        foreach (JsonElement cause in root.GetProperty("priorCauses").EnumerateArray())
+        {
+            string causeId = cause.GetProperty("id").GetString()!;
+            await WriteJsonAsync(Path.Combine(priorCausesDirectory, $"{causeId}.json"), cause);
+        }
+        await WriteJsonAsync(retryPatternsPath, root.GetProperty("retryPatterns"));
+        string canonicalBetaPath = Path.Combine(priorCausesDirectory, $"{canonicalBetaId}.json");
+        string canonicalBetaBefore = await File.ReadAllTextAsync(canonicalBetaPath);
+
+        using NodeCommand command = new(_output, label: "rejectAliasCanonicalCollision");
+        command.WithWorkingDirectory(_repoRoot).WithTimeout(TimeSpan.FromMinutes(1));
+
+        CommandResult result = await command.ExecuteScriptAsync(
+            _resolverPath,
+            analysisPath,
+            causesDirectory,
+            priorCausesDirectory,
+            retryPatternsPath);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("current batch also resolves to", result.Output, StringComparison.Ordinal);
+        Assert.Equal(canonicalBetaBefore, await File.ReadAllTextAsync(canonicalBetaPath));
+    }
+
     [Fact]
     [RequiresTools(["node"])]
     public async Task CommandLineMigratesLegacyCauseFiles()
@@ -2149,12 +2389,14 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
         return response.Result;
     }
 
-    private async Task<CommandResult> ExecuteHarnessAsync(object payload)
+    private async Task<CommandResult> ExecuteHarnessAsync(
+        object payload,
+        string operation = "resolveCauses")
     {
         string inputPath = Path.Combine(_workspace.Path, $"{Guid.NewGuid():N}.json");
         string requestJson = JsonSerializer.Serialize(new HarnessRequest
         {
-            Operation = "resolveCauses",
+            Operation = operation,
             Payload = payload
         }, s_jsonOptions);
 
@@ -2274,6 +2516,72 @@ public sealed class AnalyzeCiFailureCauseResolverTests : IDisposable
             },
             priorCauses = Array.Empty<object>(),
             retryPatterns = new { jobFailurePatterns = new[] { retryPattern } }
+        };
+
+    private static object CreateAliasCanonicalCollisionPayload(string canonicalBetaId = "canonical-beta")
+        => new
+        {
+            analysis = new
+            {
+                causes = new[] { "canonical-beta", "current-beta" },
+                failed_jobs = new[]
+                {
+                    new
+                    {
+                        id = 1,
+                        name = "Build / Alpha",
+                        classification = "transient-infra",
+                        reason = "Alpha failure token"
+                    },
+                    new
+                    {
+                        id = 2,
+                        name = "Build / Beta",
+                        classification = "transient-infra",
+                        reason = "Beta failure token"
+                    }
+                },
+                failed_tests = Array.Empty<object>()
+            },
+            causes = new[]
+            {
+                new
+                {
+                    id = "canonical-beta",
+                    type = "infra-failure",
+                    title = "Alpha failure token",
+                    error_pattern = "Alpha failure token",
+                    job_ids = new[] { 1 }
+                },
+                new
+                {
+                    id = "current-beta",
+                    type = "infra-failure",
+                    title = "Beta failure token",
+                    error_pattern = "Beta failure token",
+                    job_ids = new[] { 2 }
+                }
+            },
+            priorCauses = new[]
+            {
+                new
+                {
+                    id = "canonical-alpha",
+                    type = "infra-failure",
+                    title = "Canonical alpha",
+                    error_pattern = "Alpha failure token",
+                    matchers = new[] { new { kind = "error-literal", value = "Alpha failure token" } }
+                },
+                new
+                {
+                    id = canonicalBetaId,
+                    type = "infra-failure",
+                    title = "Canonical beta",
+                    error_pattern = "Beta failure token",
+                    matchers = new[] { new { kind = "error-literal", value = "Beta failure token" } }
+                }
+            },
+            retryPatterns = new { jobFailurePatterns = Array.Empty<object>() }
         };
 
     private static JsonElement FindOnlyCause(JsonElement result)

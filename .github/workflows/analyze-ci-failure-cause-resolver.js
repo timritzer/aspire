@@ -4,6 +4,11 @@ const path = require('node:path');
 const trackedClassifications = new Set(['flaky-test', 'transient-infra', 'main-repository-breakage']);
 const supportedCauseTypes = new Set(['flaky-test', 'infra-failure', 'main-repository-breakage']);
 const safeCauseIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const causeTypeJobClassifications = new Map([
+    ['infra-failure', 'transient-infra'],
+    ['flaky-test', 'flaky-test'],
+    ['main-repository-breakage', 'main-repository-breakage'],
+]);
 
 function resolveCauses({
     analysis,
@@ -53,7 +58,7 @@ function resolveCauses({
             testNameMatch = cause.type === 'flaky-test'
                 ? findPriorCauseByTestName(cause, priorCauses, priorById)
                 : undefined;
-            retryPatternMatch = cause.type !== 'main-repository-breakage'
+            retryPatternMatch = cause.type === 'infra-failure'
                 ? findPriorCauseByRetryPattern(evidence, jobNames, retryPatterns, priorById)
                 : undefined;
             explicitMatcherMatch = findPriorCauseByExplicitMatcher(evidence, priorCauses, priorById);
@@ -143,6 +148,18 @@ function resolveCauses({
             existing ? mergeCurrentCauses(existing, normalizedCause) : normalizedCause);
     }
 
+    for (const [legacyId, canonicalId] of priorCauseAliases) {
+        const normalizedLegacyId = normalizeCauseId(legacyId);
+        if (normalizedById.has(normalizedLegacyId)) {
+            const collision = legacyId === normalizedLegacyId
+                ? 'also resolves to it'
+                : `also resolves to '${normalizedLegacyId}'`;
+            throw new Error(
+                `Cause resolution cannot alias prior cause '${legacyId}' because the current batch ` +
+                `${collision} (proposed alias target '${canonicalId}').`);
+        }
+    }
+
     const normalizedCauses = [...normalizedById.values()];
     const referencedCauseIds = analysis.causes.map(causeId => {
         const canonicalId = proposedToCanonical.get(causeId);
@@ -172,7 +189,7 @@ function resolveCauses({
         }),
     };
 
-    validateTrackedJobsHaveCauses(normalizedAnalysis);
+    validateCauseJobAttribution(normalizedAnalysis, normalizedCauses, trustedFailedJobs);
 
     return {
         analysis: normalizedAnalysis,
@@ -516,15 +533,55 @@ function mergeCurrentCauses(existing, current) {
     });
 }
 
-function validateTrackedJobsHaveCauses(analysis) {
-    const missingJobs = analysis.failed_jobs
-        .filter(job => trackedClassifications.has(job.classification))
-        .filter(job => job.cause_ids.length === 0)
-        .map(job => `${job.name} (${job.id})`);
+function validateCauseJobAttribution(analysis, causes, trustedFailedJobs) {
+    if (!analysis || !Array.isArray(analysis.failed_jobs) || !Array.isArray(causes)) {
+        throw new Error('Cause job attribution requires failed_jobs and causes arrays.');
+    }
+    if (!Array.isArray(trustedFailedJobs) ||
+        !trustedFailedJobs.every(job => job && Number.isInteger(job.id))) {
+        throw new Error('Trusted failed jobs are invalid.');
+    }
+
+    const trustedJobIds = new Set(trustedFailedJobs.map(job => job.id));
+    if (trustedJobIds.size !== trustedFailedJobs.length) {
+        throw new Error('Trusted failed job IDs must be unique.');
+    }
+
+    const trackedJobs = analysis.failed_jobs.filter(
+        job => trackedClassifications.has(job.classification));
+    const trackedJobsById = new Map(trackedJobs.map(job => [job.id, job]));
+    const trackedJobIds = new Set(trackedJobs.map(job => job.id));
+    const coveredJobIds = new Set();
+    for (const cause of causes) {
+        if (!Array.isArray(cause?.job_ids) ||
+            cause.job_ids.length === 0 ||
+            !cause.job_ids.every(Number.isInteger)) {
+            throw new Error(`Cause '${cause?.id ?? ''}' must contain non-empty numeric job_ids.`);
+        }
+
+        for (const jobId of cause.job_ids) {
+            if (!trustedJobIds.has(jobId) || !trackedJobIds.has(jobId)) {
+                throw new Error(`Cause '${cause.id}' references untrusted failed job ID '${jobId}'.`);
+            }
+            const classification = trackedJobsById.get(jobId).classification;
+            if (causeTypeJobClassifications.get(cause.type) !== classification) {
+                throw new Error(`Cause '${cause.id}' of type '${cause.type}' cannot reference job ID '${jobId}' classified as '${classification}'.`);
+            }
+            coveredJobIds.add(jobId);
+        }
+    }
+
+    const missingJobs = trackedJobs
+        .filter(job => !coveredJobIds.has(job.id))
+        .map(job => typeof job.name === 'string' && job.name.length > 0
+            ? `${job.name} (${job.id})`
+            : String(job.id));
 
     if (missingJobs.length > 0) {
         throw new Error(`Tracked failed jobs are missing cause references: ${missingJobs.join(', ')}.`);
     }
+
+    return true;
 }
 
 function normalizeTestName(testName) {
@@ -750,4 +807,5 @@ if (require.main === module) {
 module.exports = {
     normalizeTestName,
     resolveCauses,
+    validateCauseJobAttribution,
 };

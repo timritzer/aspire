@@ -283,6 +283,10 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
             "The union of `job_ids` across all cause files MUST cover every failed job classified as `transient-infra`, `flaky-test`, or `main-repository-breakage`.",
             s_sourceWorkflow,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "`infra-failure` causes may reference only `transient-infra` jobs, `flaky-test` causes only `flaky-test` jobs, and `main-repository-breakage` causes only `main-repository-breakage` jobs.",
+            s_sourceWorkflow,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -365,6 +369,7 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
             Assert.Contains("if (trustedRunScope === 'pull-request')", workflow, StringComparison.Ordinal);
             Assert.Contains("run_id: trustedRunId", workflow, StringComparison.Ordinal);
             Assert.Contains("currentRun.run_attempt !== trustedRunAttempt", workflow, StringComparison.Ordinal);
+            Assert.Contains("name: Checkout rerun validator", workflow, StringComparison.Ordinal);
 
             var rerunValidation = GetSection(
                 workflow,
@@ -378,6 +383,8 @@ public sealed class AnalyzeCiFailureWorkflowTests(ITestOutputHelper output) : ID
             Assert.Contains("cause.type !== 'infra-failure'", rerunValidation, StringComparison.Ordinal);
             Assert.Contains("!summaryCauseIds.includes(causeId)", rerunValidation, StringComparison.Ordinal);
             Assert.Contains("!analysis.failed_jobs.every(job => job && job.classification === 'transient-infra')", rerunValidation, StringComparison.Ordinal);
+            Assert.Contains("validateCauseJobAttribution(analysis, rerunCauses, trustedFailedJobs)", rerunValidation, StringComparison.Ordinal);
+            Assert.Contains("Rerun cause attribution is invalid:", rerunValidation, StringComparison.Ordinal);
         });
     }
 
