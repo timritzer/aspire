@@ -14,7 +14,7 @@ namespace Aspire.Hosting.Kubernetes;
 /// <remarks>
 /// <para>
 /// Create a gateway using <see cref="KubernetesGatewayExtensions.AddGateway"/> and configure
-/// routes using <see cref="KubernetesGatewayExtensions.WithRoute(IResourceBuilder{KubernetesGatewayResource}, string, EndpointReference, GatewayPathMatchType)"/>.
+/// routes using <see cref="KubernetesGatewayExtensions.WithRoute(IResourceBuilder{KubernetesGatewayResource}, string, EndpointReference, GatewayPathMatchType, string)"/>.
 /// </para>
 /// <para>
 /// At publish time, the gateway generates a <c>gateway.networking.k8s.io/v1 Gateway</c> resource
@@ -98,7 +98,8 @@ internal sealed record GatewayRouteConfig(
     string? Host,
     string Path,
     GatewayPathMatchType PathType,
-    EndpointReference Endpoint);
+    EndpointReference Endpoint,
+    string? RewritePrefix = null);
 
 /// <summary>
 /// Specifies the type of path matching used in a Kubernetes Gateway API <c>HTTPRoute</c> rule.

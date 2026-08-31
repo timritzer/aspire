@@ -858,6 +858,62 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task KubernetesRouteAttachesToExistingCrossNamespaceGateway()
+    {
+        // AsExisting attaches HTTPRoutes to a Gateway that is provisioned outside the app model
+        // (for example a platform-owned shared gateway in another namespace). In that mode Aspire
+        // emits no Gateway object of its own; only the HTTPRoute is generated, and its parentRef
+        // carries the namespace + sectionName so the route binds to the correct listener.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting("shared-gateway", @namespace: "infra", sectionName: "https");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        // No Gateway object is generated when attaching to a pre-existing gateway.
+        var gatewayObjectPath = Path.Combine(workspace.Path, "templates/gateway/gateway.yaml");
+        Assert.False(File.Exists(gatewayObjectPath), "No Gateway object should be emitted when attaching to an existing gateway.");
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        await Verify(File.ReadAllText(routePath), "yaml");
+    }
+
+    [Fact]
+    public async Task KubernetesRouteWithRewritePrefixEmitsUrlRewriteFilter()
+    {
+        // A route with a rewritePrefix produces a URLRewrite filter on the HTTPRoute rule. Per the
+        // Gateway API the filter block must serialize AFTER `matches` and BEFORE `backendRefs`, which
+        // is the ordering Istio and most controllers require.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway").WithGatewayClass("nginx");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: "/");
+
+        var app = builder.Build();
+        app.Run();
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        await Verify(File.ReadAllText(routePath), "yaml");
+    }
+
+    [Fact]
     public async Task KubernetesProbeUsesContainerTargetPortNotServicePort()
     {
         // Guards EndpointProperty.TargetPort => GetPort(targetPort) in KubernetesResource.GetEndpointValue.

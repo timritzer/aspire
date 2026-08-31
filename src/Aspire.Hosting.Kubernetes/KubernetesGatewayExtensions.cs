@@ -51,6 +51,44 @@ public static class KubernetesGatewayExtensions
     }
 
     /// <summary>
+    /// Configures the gateway to attach its routes to a pre-existing, platform-owned Gateway rather
+    /// than generating a new <c>gateway.networking.k8s.io/v1 Gateway</c> object. Aspire emits only the
+    /// gateway's <c>HTTPRoute</c> resources, whose <c>parentRefs</c> target the named Gateway.
+    /// </summary>
+    /// <remarks>
+    /// This mirrors the <c>AsExisting</c> pattern used elsewhere in Aspire for referencing infrastructure
+    /// that lives outside the deployment. Because the referenced Gateway is owned by the platform, its
+    /// listeners, TLS, <c>gatewayClassName</c>, and <c>allowedRoutes</c> are managed externally and the
+    /// corresponding builder methods (<see cref="WithGatewayClass(IResourceBuilder{KubernetesGatewayResource}, string)"/>,
+    /// <see cref="WithTls(IResourceBuilder{KubernetesGatewayResource}, string)"/>) do not apply. Supplying a
+    /// <paramref name="namespace"/> lets a route attach to a Gateway in a different namespace, and a
+    /// <paramref name="sectionName"/> targets a specific listener. See the Gateway API documentation:
+    /// <see href="https://gateway-api.sigs.k8s.io/api-types/httproute/#attaching-to-gateways"/>.
+    /// </remarks>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="name">The <c>metadata.name</c> of the existing Gateway object to attach to.</param>
+    /// <param name="namespace">The namespace of the existing Gateway. When <see langword="null"/> the reference resolves within the deployment's namespace.</param>
+    /// <param name="sectionName">The listener (section) name on the existing Gateway to attach to. When <see langword="null"/> routes attach to every compatible listener.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport]
+    public static IResourceBuilder<KubernetesGatewayResource> AsExisting(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        string name,
+        string? @namespace = null,
+        string? sectionName = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrEmpty(name);
+
+        // Replace rather than append so repeated calls are idempotent and the last one wins, matching
+        // how the other single-valued Kubernetes annotations in this package are applied.
+        return builder.WithAnnotation(
+            new ExistingKubernetesGatewayAnnotation(name, @namespace, sectionName),
+            ResourceAnnotationMutationBehavior.Replace);
+    }
+
+    /// <summary>
     /// Sets the GatewayClass name that selects which controller implementation handles this gateway.
     /// </summary>
     /// <param name="builder">The gateway resource builder.</param>
@@ -98,6 +136,12 @@ public static class KubernetesGatewayExtensions
     /// <param name="path">The URL path to match (e.g., <c>"/"</c> or <c>"/api"</c>). Must start with <c>/</c>.</param>
     /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
     /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
+    /// <param name="rewritePrefix">
+    /// When set, rewrites the matched path prefix to this value before the request reaches the backend
+    /// (e.g. a route at <c>"/my-app"</c> with <paramref name="rewritePrefix"/> <c>"/"</c> presents the
+    /// backend with <c>"/"</c>). Emitted as a Gateway API <c>URLRewrite</c> filter with a
+    /// <c>ReplacePrefixMatch</c> path modifier.
+    /// </param>
     /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
     /// <ats-returns>The resource builder.</ats-returns>
     [AspireExport("withGatewayPathRoute")]
@@ -105,7 +149,8 @@ public static class KubernetesGatewayExtensions
         this IResourceBuilder<KubernetesGatewayResource> builder,
         string path,
         EndpointReference endpoint,
-        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix,
+        string? rewritePrefix = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrEmpty(path);
@@ -120,7 +165,8 @@ public static class KubernetesGatewayExtensions
             Host: null,
             Path: path,
             PathType: pathType,
-            Endpoint: endpoint));
+            Endpoint: endpoint,
+            RewritePrefix: rewritePrefix));
 
         return builder;
     }
@@ -135,6 +181,12 @@ public static class KubernetesGatewayExtensions
     /// <param name="path">The URL path to match. Must start with <c>/</c>.</param>
     /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
     /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
+    /// <param name="rewritePrefix">
+    /// When set, rewrites the matched path prefix to this value before the request reaches the backend
+    /// (e.g. a route at <c>"/my-app"</c> with <paramref name="rewritePrefix"/> <c>"/"</c> presents the
+    /// backend with <c>"/"</c>). Emitted as a Gateway API <c>URLRewrite</c> filter with a
+    /// <c>ReplacePrefixMatch</c> path modifier.
+    /// </param>
     /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
     /// <ats-returns>The resource builder.</ats-returns>
     [AspireExport("withGatewayHostRoute")]
@@ -143,7 +195,8 @@ public static class KubernetesGatewayExtensions
         string host,
         string path,
         EndpointReference endpoint,
-        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix,
+        string? rewritePrefix = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrEmpty(host);
@@ -159,7 +212,8 @@ public static class KubernetesGatewayExtensions
             Host: host,
             Path: path,
             PathType: pathType,
-            Endpoint: endpoint));
+            Endpoint: endpoint,
+            RewritePrefix: rewritePrefix));
 
         return builder;
     }
