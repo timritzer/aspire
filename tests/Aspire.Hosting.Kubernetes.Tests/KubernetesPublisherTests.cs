@@ -914,6 +914,38 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task KubernetesRouteOnExistingGatewayInheritsConfiguredHostnames()
+    {
+        // Hostnames configured on the gateway resource feed two distinct consumers: the listeners of a
+        // Gateway we generate, and HTTPRoute.spec.hostnames on every route. Only the former is skipped
+        // in existing mode. A hostless route must still inherit the configured hostnames, otherwise the
+        // Gateway API treats it as matching every listener that admits it, over-attaching the route
+        // across all listeners of a shared platform gateway.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting("shared-gateway", @namespace: "infra")
+            .WithHostname("app.example.com");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        var gatewayObjectPath = Path.Combine(workspace.Path, "templates/gateway/gateway.yaml");
+        Assert.False(File.Exists(gatewayObjectPath), "No Gateway object should be emitted when attaching to an existing gateway.");
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        await Verify(File.ReadAllText(routePath), "yaml");
+    }
+
+    [Fact]
     public async Task KubernetesProbeUsesContainerTargetPortNotServicePort()
     {
         // Guards EndpointProperty.TargetPort => GetPort(targetPort) in KubernetesResource.GetEndpointValue.

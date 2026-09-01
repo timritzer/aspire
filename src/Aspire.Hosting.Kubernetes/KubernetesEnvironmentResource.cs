@@ -1047,7 +1047,26 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
         // an existing Gateway it is the user-supplied name of the cluster object, used verbatim.
         var parentRefName = isExisting ? existingGateway!.Name : gatewayName;
 
-        List<string> resolvedHostnames = [];
+        // Configured hostnames feed two distinct consumers: the listeners of a Gateway we generate, and
+        // HTTPRoute.spec.hostnames on every route we generate. Only the former is a Gateway-owner
+        // concern, so resolution and the route hostname limit run in both modes. A route attached to an
+        // existing Gateway still needs its own hostnames — the Gateway API treats a hostname-less route
+        // as matching every listener that admits it, which would over-attach it across all listeners of
+        // a shared platform Gateway.
+        var resolvedHostnames = await ResolveHostnamesAsync(
+            gatewayResource.Hostnames,
+            gatewayResource.Name,
+            cancellationToken).ConfigureAwait(false);
+
+        if (resolvedHostnames.Count > HttpRouteHostnameLimit &&
+            gatewayResource.Routes.Any(route => route.Host is null))
+        {
+            throw new InvalidOperationException(
+                $"Gateway '{gatewayResource.Name}' configures {resolvedHostnames.Count} hostnames that would be inherited by a hostless route, " +
+                $"but Kubernetes Gateway API HTTPRoute.spec.hostnames supports at most {HttpRouteHostnameLimit} entries. " +
+                $"Define explicit host-scoped routes with WithRoute(hostname, path, endpoint) so each HTTPRoute stays within the limit. " +
+                $"See the Kubernetes Gateway API documentation: {HttpRouteSpecDocumentationUrl}");
+        }
 
         if (!isExisting)
         {
@@ -1062,20 +1081,6 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
             {
                 Metadata = { Name = gatewayName }
             };
-            resolvedHostnames = await ResolveHostnamesAsync(
-                gatewayResource.Hostnames,
-                gatewayResource.Name,
-                cancellationToken).ConfigureAwait(false);
-
-            if (resolvedHostnames.Count > HttpRouteHostnameLimit &&
-                gatewayResource.Routes.Any(route => route.Host is null))
-            {
-                throw new InvalidOperationException(
-                    $"Gateway '{gatewayResource.Name}' configures {resolvedHostnames.Count} hostnames that would be inherited by a hostless route, " +
-                    $"but Kubernetes Gateway API HTTPRoute.spec.hostnames supports at most {HttpRouteHostnameLimit} entries. " +
-                    $"Define explicit host-scoped routes with WithRoute(hostname, path, endpoint) so each HTTPRoute stays within the limit. " +
-                    $"See the Kubernetes Gateway API documentation: {HttpRouteSpecDocumentationUrl}");
-            }
 
             gateway.Spec.GatewayClassName = await ResolveExpressionAsync(gatewayResource.GatewayClassName, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
 
