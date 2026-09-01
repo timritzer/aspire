@@ -6,26 +6,14 @@ resource myidentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30
   location: location
 }
 
-resource fedcred_team_a_worker 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
-  name: 'team-a-worker-fedcred'
+resource fedcred_my_namespace_my_workload_fedcred 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
+  name: 'my-namespace-my-workload-fedcred'
   properties: {
     audiences: [
       'api://AzureADTokenExchange'
     ]
     issuer: 'https://oidc.example.com/cluster/'
-    subject: 'system:serviceaccount:team-a:worker'
-  }
-  parent: myidentity
-}
-
-resource fedcred_team_b_worker 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
-  name: 'team-b-worker-fedcred'
-  properties: {
-    audiences: [
-      'api://AzureADTokenExchange'
-    ]
-    issuer: 'https://oidc.example.com/cluster/'
-    subject: 'system:serviceaccount:team-b:worker'
+    subject: 'system:serviceaccount:my-namespace:my.workload'
   }
   parent: myidentity
 }

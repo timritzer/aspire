@@ -348,6 +348,9 @@ namespace Aspire.Hosting.Azure
         [AspireExport("withUserAssignedIdentityAzureUserAssignedIdentity", MethodName = "withAzureUserAssignedIdentity")]
         public static ApplicationModel.IResourceBuilder<T> WithAzureUserAssignedIdentity<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<AzureUserAssignedIdentityResource> identityResourceBuilder)
             where T : ApplicationModel.IComputeResource { throw null; }
+
+        [AspireExportIgnore(Reason = "BicepValue<string> has no ATS representation; the parameter exists to accept an unresolved Bicep expression for the OIDC issuer.")]
+        public static ApplicationModel.IResourceBuilder<AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederation(this ApplicationModel.IResourceBuilder<AzureUserAssignedIdentityResource> identity, global::Azure.Provisioning.BicepValue<string> oidcIssuerUrl, string kubernetesNamespace, string serviceAccountName) { throw null; }
     }
 
     public sealed partial class AzureUserAssignedIdentityResource : AzureProvisioningResource, IAppIdentityResource

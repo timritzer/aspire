@@ -6,13 +6,13 @@ resource myidentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30
   location: location
 }
 
-resource fedcred_my_namespace_my_workload 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
+resource fedcred_my_namespace_my_workload_fedcred 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
   name: 'my-namespace-my-workload-fedcred'
   properties: {
     audiences: [
       'api://AzureADTokenExchange'
     ]
-    issuer: 'https://oidc.prod-aks.azure.com/11111111-2222-3333-4444-555555555555/'
+    issuer: 'https://oidc.example.com/cluster/'
     subject: 'system:serviceaccount:my-namespace:my-workload'
   }
   parent: myidentity

@@ -15,6 +15,7 @@
   <ItemGroup>
     <Compile Remove="tools\**\*.cs" />
     <Compile Include="$(SharedDir)BicepFormattingHelpers.cs" LinkBase="Shared\BicepFormattingHelpers.cs" />
+    <Compile Include="$(SharedDir)KubernetesFederatedIdentityCredentialFactory.cs" LinkBase="Shared\KubernetesFederatedIdentityCredentialFactory.cs" />
   </ItemGroup>
 
   <ItemGroup>
