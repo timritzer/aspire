@@ -8,7 +8,7 @@ resource myidentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30
   location: location
 }
 
-resource fedcred_my_namespace_my_workload 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
+resource fedcred_my_namespace_my_workload_fedcred 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
   name: 'my-namespace-my-workload-fedcred'
   properties: {
     audiences: [
