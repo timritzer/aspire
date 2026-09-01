@@ -21,24 +21,24 @@ namespace Aspire.Hosting.Kubernetes;
 /// <param name="namespace">The namespace of the existing Gateway, or <see langword="null"/> to resolve the reference within the deployment's namespace.</param>
 /// <param name="sectionName">The listener (section) name to attach to, or <see langword="null"/> to attach to every compatible listener.</param>
 internal sealed class ExistingKubernetesGatewayAnnotation(
-    string name,
-    string? @namespace = null,
-    string? sectionName = null) : IResourceAnnotation
+    ReferenceExpression name,
+    ReferenceExpression? @namespace = null,
+    ReferenceExpression? sectionName = null) : IResourceAnnotation
 {
     /// <summary>
     /// Gets the <c>metadata.name</c> of the existing Gateway object.
     /// </summary>
-    public string Name { get; } = name ?? throw new ArgumentNullException(nameof(name));
+    public ReferenceExpression Name { get; } = name ?? throw new ArgumentNullException(nameof(name));
 
     /// <summary>
     /// Gets the namespace of the existing Gateway. When <see langword="null"/> the reference
     /// resolves within the deployment's namespace.
     /// </summary>
-    public string? Namespace { get; } = @namespace;
+    public ReferenceExpression? Namespace { get; } = @namespace;
 
     /// <summary>
     /// Gets the listener (section) name on the existing Gateway. When <see langword="null"/>
     /// routes attach to every compatible listener.
     /// </summary>
-    public string? SectionName { get; } = sectionName;
+    public ReferenceExpression? SectionName { get; } = sectionName;
 }
