@@ -946,6 +946,57 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task KubernetesRouteOnExistingGatewayCapturesParameterHostnameAsHelmValue()
+    {
+        // The literal-hostname test above never exercises the Helm value-capture path. A
+        // parameter-backed hostname must render into the HTTPRoute as
+        // `{{ .Values.parameters.<gateway>.<param> }}` and be registered in values.yaml, otherwise
+        // the published chart references a value that was never declared and `helm template`
+        // substitutes <no value>. Existing mode is the case that matters: hostname resolution used
+        // to be skipped entirely there, so the capture never ran.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+
+        // Unique parameter name per run to defeat any persistent state file lookup. No default value:
+        // ShouldCaptureAsHelmValue only captures parameters whose Default is null (or that are secret),
+        // so a defaulted parameter would be inlined as a literal and never reach the capture path.
+        var hostnameParamName = $"gatewayhost{Guid.NewGuid():N}";
+        var hostnameParam = builder.AddParameter(hostnameParamName);
+
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting("shared-gateway", @namespace: "infra")
+            .WithHostname(hostnameParam);
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        var routePath = Path.Combine(workspace.Path, "templates", "gateway", "route.yaml");
+        Assert.True(File.Exists(routePath), $"Expected HTTPRoute manifest at {routePath}");
+        var routeContent = await File.ReadAllTextAsync(routePath);
+
+        // Must be a Helm reference, not a raw ReferenceExpression placeholder or an inlined literal.
+        Assert.DoesNotContain("\"{0}\"", routeContent);
+        Assert.Contains($"{{{{ .Values.parameters.gateway.{hostnameParamName} }}}}", routeContent);
+
+        var valuesPath = Path.Combine(workspace.Path, "values.yaml");
+        Assert.True(File.Exists(valuesPath), $"Expected values.yaml at {valuesPath}");
+        var valuesContent = await File.ReadAllTextAsync(valuesPath);
+
+        Assert.Matches(
+            new System.Text.RegularExpressions.Regex(@"parameters:[\s\S]+gateway:[\s\S]+" +
+                System.Text.RegularExpressions.Regex.Escape(hostnameParamName) + @"\s*:"),
+            valuesContent);
+    }
+
+    [Fact]
     public async Task KubernetesProbeUsesContainerTargetPortNotServicePort()
     {
         // Guards EndpointProperty.TargetPort => GetPort(targetPort) in KubernetesResource.GetEndpointValue.
