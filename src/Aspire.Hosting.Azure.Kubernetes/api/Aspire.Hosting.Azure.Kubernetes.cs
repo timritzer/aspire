@@ -28,6 +28,9 @@ namespace Aspire.Hosting
         [AspireExport]
         public static ApplicationModel.IResourceBuilder<Azure.Kubernetes.AzureKubernetesEnvironmentResource> WithContainerRegistry(this ApplicationModel.IResourceBuilder<Azure.Kubernetes.AzureKubernetesEnvironmentResource> builder, ApplicationModel.IResourceBuilder<Azure.AzureContainerRegistryResource> registry) { throw null; }
 
+        [AspireExportIgnore]
+        public static ApplicationModel.IResourceBuilder<Azure.AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederation(this ApplicationModel.IResourceBuilder<Azure.AzureUserAssignedIdentityResource> identity, global::Azure.Provisioning.BicepValue<string> oidcIssuerUrl, string kubernetesNamespace, string serviceAccountName) { throw null; }
+
         [AspireExport("withNodePoolSubnet", MethodName = "withSubnet")]
         public static ApplicationModel.IResourceBuilder<Azure.Kubernetes.AksNodePoolResource> WithSubnet(this ApplicationModel.IResourceBuilder<Azure.Kubernetes.AksNodePoolResource> builder, ApplicationModel.IResourceBuilder<Azure.AzureSubnetResource> subnet) { throw null; }
 
