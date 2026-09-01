@@ -8,6 +8,7 @@
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Azure;
 using Aspire.Hosting.Azure.Kubernetes;
+using Aspire.Hosting.Azure.Utils;
 using Aspire.Hosting.Kubernetes;
 using Aspire.Hosting.Kubernetes.Extensions;
 using Aspire.Hosting.Pipelines;
@@ -846,18 +847,17 @@ public static class AzureKubernetesEnvironmentExtensions
             existingIdentity.Name = identityNameParam;
             infrastructure.Add(existingIdentity);
 
-            var fedCred = new FederatedIdentityCredential($"fedcred_{sanitizedName}")
-            {
-                Parent = existingIdentity,
-                Name = $"{resourceName}-fedcred",
-                IssuerUri = new MemberExpression(
+            var fedCred = KubernetesFederatedIdentityCredentialFactory.Create(
+                bicepIdentifier: $"fedcred_{sanitizedName}",
+                name: $"{resourceName}-fedcred",
+                parent: existingIdentity,
+                issuerUri: new MemberExpression(
                     new MemberExpression(
                         new MemberExpression(new IdentifierExpression(aks.BicepIdentifier), "properties"),
                         "oidcIssuerProfile"),
                     "issuerURL"),
-                Subject = $"system:serviceaccount:{k8sNamespace}:{saName}",
-                Audiences = { "api://AzureADTokenExchange" }
-            };
+                kubernetesNamespace: k8sNamespace,
+                serviceAccountName: saName);
             infrastructure.Add(fedCred);
         }
     }
