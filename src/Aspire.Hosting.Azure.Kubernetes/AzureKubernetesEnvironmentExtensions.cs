@@ -507,6 +507,117 @@ public static class AzureKubernetesEnvironmentExtensions
         return builder;
     }
 
+    /// <summary>
+    /// Emits a federated identity credential linking <paramref name="identity"/> to the Kubernetes
+    /// service account <c>system:serviceaccount:{kubernetesNamespace}:{serviceAccountName}</c>.
+    /// </summary>
+    /// <param name="identity">The user assigned identity to federate.</param>
+    /// <param name="oidcIssuerUrl">The OIDC issuer URL of the Kubernetes cluster that will present the service account token.</param>
+    /// <param name="kubernetesNamespace">The namespace containing the Kubernetes service account.</param>
+    /// <param name="serviceAccountName">The name of the Kubernetes service account.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{AzureUserAssignedIdentityResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    /// <remarks>
+    /// <para>
+    /// The OIDC issuer is supplied as a value rather than read from a provisioned cluster, so this works
+    /// against a pre-existing cluster and for compute environments that provision no cluster of their own.
+    /// <see cref="AddAzureKubernetesEnvironment"/> already wires federation for its own compute resources;
+    /// this method is for the cases that environment does not cover.
+    /// </para>
+    /// <para>
+    /// This emits only the Azure half of workload identity. The cluster half — a <c>ServiceAccount</c>
+    /// annotated with the identity's client ID and a pod labelled <c>azure.workload.identity/use</c> — is
+    /// the caller's responsibility, and the service account it creates must match
+    /// <paramref name="kubernetesNamespace"/> and <paramref name="serviceAccountName"/> exactly or token
+    /// exchange will fail.
+    /// </para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// var identity = builder.AddAzureUserAssignedIdentity("workload-identity");
+    ///
+    /// identity.WithKubernetesServiceAccountFederation(
+    ///     oidcIssuerUrl: clusterIssuerUrl,
+    ///     kubernetesNamespace: "my-namespace",
+    ///     serviceAccountName: "my-workload");
+    /// </code>
+    /// </example>
+    // Not an ATS capability: BicepValue<string> has no polyglot representation, and the whole point of
+    // this overload is to accept an arbitrary Bicep expression for the issuer.
+    [AspireExportIgnore]
+    public static IResourceBuilder<AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederation(
+        this IResourceBuilder<AzureUserAssignedIdentityResource> identity,
+        BicepValue<string> oidcIssuerUrl,
+        string kubernetesNamespace,
+        string serviceAccountName)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        ArgumentNullException.ThrowIfNull(oidcIssuerUrl);
+        ArgumentException.ThrowIfNullOrEmpty(kubernetesNamespace);
+        ArgumentException.ThrowIfNullOrEmpty(serviceAccountName);
+
+        return identity.ConfigureInfrastructure(infrastructure =>
+        {
+            // The credential is emitted into the identity's own module, so its parent is the
+            // UserAssignedIdentity that AzureUserAssignedIdentityResource has already added to this
+            // infrastructure. That is why there is no FromExisting/name-parameter round trip here:
+            // unlike the AKS environment (which emits into a *different* module and therefore has to
+            // re-reference the identity), this module owns the identity outright.
+            var userAssignedIdentity = infrastructure.GetProvisionableResources()
+                .OfType<UserAssignedIdentity>()
+                .Single();
+
+            // Namespace and service account are both part of the identifier because the same service
+            // account name in two namespaces is an ordinary Kubernetes arrangement, and Azure requires
+            // a distinct credential name per subject.
+            var suffix = Infrastructure.NormalizeBicepIdentifier($"{kubernetesNamespace}_{serviceAccountName}");
+
+            infrastructure.Add(CreateKubernetesFederatedIdentityCredential(
+                bicepIdentifier: $"fedcred_{suffix}",
+                name: $"{kubernetesNamespace}-{serviceAccountName}-fedcred",
+                parent: userAssignedIdentity,
+                // Compile() rather than converting through System.Uri: Uri would normalise the value
+                // (for example appending a trailing slash to an authority-only URL), and Entra compares
+                // the issuer against the token's `iss` claim byte for byte. Compile() also keeps a
+                // caller-supplied Bicep expression intact instead of forcing a literal.
+                issuerUri: oidcIssuerUrl.Compile(),
+                kubernetesNamespace: kubernetesNamespace,
+                serviceAccountName: serviceAccountName));
+        });
+    }
+
+    /// <summary>
+    /// Builds the federated identity credential that lets a Kubernetes service account exchange its
+    /// projected token for an Entra token issued to <paramref name="parent"/>.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the AKS environment's own workload-identity wiring and by
+    /// <see cref="WithKubernetesServiceAccountFederation"/> so the subject format and audience — the two
+    /// values Entra matches exactly and that silently break token exchange when they drift — are
+    /// written down once. Callers supply the identifier, name, parent, and issuer because those legitimately
+    /// differ: the AKS path re-references the identity from another module and reads the issuer off the
+    /// cluster it just provisioned.
+    /// </remarks>
+    private static FederatedIdentityCredential CreateKubernetesFederatedIdentityCredential(
+        string bicepIdentifier,
+        string name,
+        UserAssignedIdentity parent,
+        BicepValue<Uri> issuerUri,
+        string kubernetesNamespace,
+        string serviceAccountName)
+        => new(bicepIdentifier)
+        {
+            Parent = parent,
+            Name = name,
+            IssuerUri = issuerUri,
+            // Entra compares this against the `sub` claim of the projected service account token, whose
+            // value is always `system:serviceaccount:<namespace>:<name>`.
+            // https://learn.microsoft.com/azure/aks/workload-identity-overview
+            Subject = $"system:serviceaccount:{kubernetesNamespace}:{serviceAccountName}",
+            // The only audience Entra Workload ID accepts for Kubernetes token exchange.
+            Audiences = { "api://AzureADTokenExchange" }
+        };
+
     private static void ConfigureAksInfrastructure(AzureResourceInfrastructure infrastructure)
     {
         var aksResource = (AzureKubernetesEnvironmentResource)infrastructure.AspireResource;
@@ -846,18 +957,17 @@ public static class AzureKubernetesEnvironmentExtensions
             existingIdentity.Name = identityNameParam;
             infrastructure.Add(existingIdentity);
 
-            var fedCred = new FederatedIdentityCredential($"fedcred_{sanitizedName}")
-            {
-                Parent = existingIdentity,
-                Name = $"{resourceName}-fedcred",
-                IssuerUri = new MemberExpression(
+            var fedCred = CreateKubernetesFederatedIdentityCredential(
+                bicepIdentifier: $"fedcred_{sanitizedName}",
+                name: $"{resourceName}-fedcred",
+                parent: existingIdentity,
+                issuerUri: new MemberExpression(
                     new MemberExpression(
                         new MemberExpression(new IdentifierExpression(aks.BicepIdentifier), "properties"),
                         "oidcIssuerProfile"),
                     "issuerURL"),
-                Subject = $"system:serviceaccount:{k8sNamespace}:{saName}",
-                Audiences = { "api://AzureADTokenExchange" }
-            };
+                kubernetesNamespace: k8sNamespace,
+                serviceAccountName: saName);
             infrastructure.Add(fedCred);
         }
     }
