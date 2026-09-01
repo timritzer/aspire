@@ -615,28 +615,36 @@ public static class CertManagerExtensions
                     // Route-less gateways are excluded because they are skipped during
                     // materialization: a parentRef to a Gateway that is never created is just as
                     // orphaned, and it would also mask the warning below.
+                    // Existing (platform-owned) gateways are excluded for the same reason — Aspire
+                    // emits no Gateway object for them, so the name normalized below would not
+                    // resolve. They are also the wrong target on principle: the platform owns the
+                    // listener and its TLS, so it, not Aspire, is responsible for solving ACME
+                    // challenges against that Gateway.
                     var nameComparer = new ResourceNameComparer();
                     var parentGateways = model.Resources
                         .OfType<KubernetesGatewayResource>()
                         .Where(g => nameComparer.Equals(g.Parent, certManager.Parent)
                                     && g.ShouldMaterialize
+                                    && !g.TryGetLastAnnotation<ExistingKubernetesGatewayAnnotation>(out _)
                                     && g.GatewayAnnotations.TryGetValue(ClusterIssuerAnnotationKey, out var v)
                                     && string.Equals(v.Format, issuer.Name, StringComparison.Ordinal))
                         .ToList();
 
                     if (parentGateways.Count == 0)
                     {
-                        // No eligible gateway found — either none is annotated for this issuer, or
-                        // the annotated ones have no routes and are therefore skipped during
-                        // materialization. Either way cert-manager will accept this manifest but the
-                        // HTTP-01 challenge can never be satisfied, because there's no parent Gateway
-                        // for the solver's HTTPRoute to attach to. Emit a warning so the
+                        // No eligible gateway found — either none is annotated for this issuer, the
+                        // annotated ones have no routes and are therefore skipped during
+                        // materialization, or they are platform-owned via AsExisting(...) and so are
+                        // never created by Aspire. Either way cert-manager will accept this manifest
+                        // but the HTTP-01 challenge can never be satisfied, because there's no parent
+                        // Gateway for the solver's HTTPRoute to attach to. Emit a warning so the
                         // misconfiguration is visible at deploy time instead of leaving the user
                         // to discover it via Certificates stuck in 'Pending' indefinitely.
                         logger.LogWarning(
                             "ClusterIssuer '{IssuerName}' has an HTTP-01 solver but no Gateway in environment '{EnvironmentName}' is both annotated with " +
-                            ClusterIssuerAnnotationKey + "={IssuerName} and configured with at least one route. cert-manager will not be able to satisfy " +
-                            "ACME challenges until at least one routed Gateway adopts this issuer (e.g. via WithRoute(...) and WithTls(issuer)).",
+                            ClusterIssuerAnnotationKey + "={IssuerName} and eligible to host the solver route. An eligible Gateway must have at least one " +
+                            "route and must not be marked AsExisting(...), because a platform-owned Gateway is not created by Aspire. cert-manager will not " +
+                            "be able to satisfy ACME challenges until at least one such Gateway adopts this issuer (e.g. via WithRoute(...) and WithTls(issuer)).",
                             issuer.Name,
                             certManager.Parent.Name,
                             issuer.Name);

@@ -1029,91 +1029,123 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        if (gatewayResource.GatewayClassName is null)
-        {
-            throw new InvalidOperationException(
-                $"Gateway '{gatewayResource.Name}' must have a GatewayClassName set via WithGatewayClass(). " +
-                $"The Gateway API requires a gatewayClassName to select the controller implementation.");
-        }
-
-        var gatewayName = gatewayResource.Name.ToKubernetesResourceName();
-
         // This whole method re-runs when the deployment-target step executes a second time (once for
         // "before-start", once in the publish/deploy DAG). GeneratedGateway is assigned so it replaces
         // itself, but GeneratedHttpRoutes is appended to — without clearing, every route is emitted
         // twice and the chart renders duplicate HTTPRoute objects with identical names.
         gatewayResource.GeneratedHttpRoutes.Clear();
 
-        var gateway = new GatewayV1
+        // When attaching to a pre-existing Gateway we emit no Gateway object of our own: the platform
+        // owns it (its listeners, TLS, and allowedRoutes). We only generate HTTPRoutes whose parentRef
+        // targets the existing Gateway by name (and namespace/sectionName when supplied). GatewayClass,
+        // hostnames-as-listeners, and TLS are all Gateway-owner concerns and are intentionally skipped.
+        var isExisting = gatewayResource.TryGetLastAnnotation<ExistingKubernetesGatewayAnnotation>(out var existingGateway);
+
+        var gatewayName = gatewayResource.Name.ToKubernetesResourceName();
+
+        // The parentRef name for a generated Gateway is our resource name (kubernetes-normalized). For
+        // an existing Gateway it is the user-supplied name of the cluster object, used verbatim. The
+        // identity parts are resolved through the same expression pipeline as every other user-supplied
+        // value so that parameter-backed names surface as Helm values in the generated chart.
+        var parentRefName = isExisting
+            ? await ResolveExpressionAsync(existingGateway!.Name, gatewayResource.Name, cancellationToken).ConfigureAwait(false)
+            : gatewayName;
+
+        var parentRefNamespace = existingGateway?.Namespace is null
+            ? null
+            : await ResolveExpressionAsync(existingGateway.Namespace, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
+
+        var parentRefSectionName = existingGateway?.SectionName is null
+            ? null
+            : await ResolveExpressionAsync(existingGateway.SectionName, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
+
+        if (isExisting)
         {
-            Metadata = { Name = gatewayName }
-        };
+            // Silently discarding these would be worse than not offering them: each one configures the
+            // Gateway object, which the platform owns here, so the intent cannot be honoured. Warn rather
+            // than throw because AsExisting() and the calls below are independent and may appear in either
+            // order — and because a provider package (for example Azure Application Gateway for Containers)
+            // can populate GatewayAnnotations without the app author naming them directly.
+            List<string> ignored = [];
+
+            if (gatewayResource.GatewayClassName is not null)
+            {
+                ignored.Add("gateway class");
+            }
+
+            if (gatewayResource.TlsConfigs.Count > 0)
+            {
+                ignored.Add("TLS configuration");
+            }
+
+            if (gatewayResource.GatewayAnnotations.Count > 0)
+            {
+                ignored.Add("gateway annotations");
+            }
+
+            if (ignored.Count > 0)
+            {
+                logger.LogWarning(
+                    "Gateway '{GatewayName}' is marked AsExisting(), so Aspire does not create a Gateway object for it. " +
+                    "The following configuration applies to the Gateway itself and will be ignored: {IgnoredConfiguration}. " +
+                    "Configure these on the platform-owned Gateway instead.",
+                    gatewayResource.Name,
+                    string.Join(", ", ignored));
+            }
+        }
+
+        // Configured hostnames feed two distinct consumers: the listeners of a Gateway we generate, and
+        // HTTPRoute.spec.hostnames on every route we generate. Only the former is a Gateway-owner
+        // concern, so resolution runs in both modes. A route attached to an existing Gateway still needs
+        // its own hostnames — the Gateway API treats a hostname-less route as matching every listener
+        // that admits it, which would over-attach it across all listeners of a shared platform Gateway.
         var resolvedHostnames = await ResolveHostnamesAsync(
             gatewayResource.Hostnames,
             gatewayResource.Name,
             cancellationToken).ConfigureAwait(false);
 
-        if (resolvedHostnames.Count > HttpRouteHostnameLimit &&
-            gatewayResource.Routes.Any(route => route.Host is null))
+        if (!isExisting)
         {
-            throw new InvalidOperationException(
-                $"Gateway '{gatewayResource.Name}' configures {resolvedHostnames.Count} hostnames that would be inherited by a hostless route, " +
-                $"but Kubernetes Gateway API HTTPRoute.spec.hostnames supports at most {HttpRouteHostnameLimit} entries. " +
-                $"Define explicit host-scoped routes with WithRoute(hostname, path, endpoint) so each HTTPRoute stays within the limit. " +
-                $"See the Kubernetes Gateway API documentation: {HttpRouteSpecDocumentationUrl}");
-        }
-
-        gateway.Spec.GatewayClassName = await ResolveExpressionAsync(gatewayResource.GatewayClassName, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
-
-        foreach (var (key, value) in gatewayResource.GatewayAnnotations)
-        {
-            gateway.Metadata.Annotations[key] = await ResolveExpressionAsync(value, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
-        }
-
-        gateway.Spec.Listeners.Add(new GatewayListenerV1
-        {
-            Name = "http",
-            Protocol = "HTTP",
-            Port = 80,
-            AllowedRoutes = new GatewayAllowedRoutesV1
+            if (gatewayResource.GatewayClassName is null)
             {
-                Namespaces = new GatewayRouteNamespacesV1 { From = "Same" }
+                throw new InvalidOperationException(
+                    $"Gateway '{gatewayResource.Name}' must have a GatewayClassName set via WithGatewayClass(). " +
+                    $"The Gateway API requires a gatewayClassName to select the controller implementation.");
             }
-        });
 
-        var tlsListenerIndex = 0;
-        foreach (var tls in gatewayResource.TlsConfigs)
-        {
-            var resolvedSecretName = await ResolveExpressionAsync(tls.SecretName, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
-
-            if (resolvedHostnames.Count == 0)
+            var gateway = new GatewayV1
             {
-                // No hostnames specified — create an HTTPS listener without a hostname restriction.
-                // The hostname will be discovered from the Gateway's assigned address after deployment
-                // and patched onto the listener to enable cert-manager certificate issuance.
-                var listenerName = tlsListenerIndex == 0 ? "https" : $"https-{tlsListenerIndex}";
-                tlsListenerIndex++;
+                Metadata = { Name = gatewayName }
+            };
 
-                gateway.Spec.Listeners.Add(new GatewayListenerV1
-                {
-                    Name = listenerName,
-                    Protocol = "HTTPS",
-                    Port = 443,
-                    Tls = new GatewayTlsConfigV1
-                    {
-                        Mode = "Terminate",
-                        CertificateRefs = { new GatewayCertificateRefV1 { Name = resolvedSecretName } }
-                    },
-                    AllowedRoutes = new GatewayAllowedRoutesV1
-                    {
-                        Namespaces = new GatewayRouteNamespacesV1 { From = "Same" }
-                    }
-                });
+            gateway.Spec.GatewayClassName = await ResolveExpressionAsync(gatewayResource.GatewayClassName, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
+
+            foreach (var (key, value) in gatewayResource.GatewayAnnotations)
+            {
+                gateway.Metadata.Annotations[key] = await ResolveExpressionAsync(value, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
             }
-            else
+
+            gateway.Spec.Listeners.Add(new GatewayListenerV1
             {
-                foreach (var resolvedHost in resolvedHostnames)
+                Name = "http",
+                Protocol = "HTTP",
+                Port = 80,
+                AllowedRoutes = new GatewayAllowedRoutesV1
                 {
+                    Namespaces = new GatewayRouteNamespacesV1 { From = "Same" }
+                }
+            });
+
+            var tlsListenerIndex = 0;
+            foreach (var tls in gatewayResource.TlsConfigs)
+            {
+                var resolvedSecretName = await ResolveExpressionAsync(tls.SecretName, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
+
+                if (resolvedHostnames.Count == 0)
+                {
+                    // No hostnames specified — create an HTTPS listener without a hostname restriction.
+                    // The hostname will be discovered from the Gateway's assigned address after deployment
+                    // and patched onto the listener to enable cert-manager certificate issuance.
                     var listenerName = tlsListenerIndex == 0 ? "https" : $"https-{tlsListenerIndex}";
                     tlsListenerIndex++;
 
@@ -1122,7 +1154,6 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
                         Name = listenerName,
                         Protocol = "HTTPS",
                         Port = 443,
-                        Hostname = resolvedHost,
                         Tls = new GatewayTlsConfigV1
                         {
                             Mode = "Terminate",
@@ -1134,10 +1165,47 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
                         }
                     });
                 }
+                else
+                {
+                    foreach (var resolvedHost in resolvedHostnames)
+                    {
+                        var listenerName = tlsListenerIndex == 0 ? "https" : $"https-{tlsListenerIndex}";
+                        tlsListenerIndex++;
+
+                        gateway.Spec.Listeners.Add(new GatewayListenerV1
+                        {
+                            Name = listenerName,
+                            Protocol = "HTTPS",
+                            Port = 443,
+                            Hostname = resolvedHost,
+                            Tls = new GatewayTlsConfigV1
+                            {
+                                Mode = "Terminate",
+                                CertificateRefs = { new GatewayCertificateRefV1 { Name = resolvedSecretName } }
+                            },
+                            AllowedRoutes = new GatewayAllowedRoutesV1
+                            {
+                                Namespaces = new GatewayRouteNamespacesV1 { From = "Same" }
+                            }
+                        });
+                    }
+                }
             }
+
+            gatewayResource.GeneratedGateway = gateway;
         }
 
-        gatewayResource.GeneratedGateway = gateway;
+        // A hostless route inherits every configured hostname, so the limit applies at route emission
+        // rather than to the Gateway. Checked in both modes because routes are emitted in both.
+        if (resolvedHostnames.Count > HttpRouteHostnameLimit &&
+            gatewayResource.Routes.Any(route => route.Host is null))
+        {
+            throw new InvalidOperationException(
+                $"Gateway '{gatewayResource.Name}' configures {resolvedHostnames.Count} hostnames that would be inherited by a hostless route, " +
+                $"but Kubernetes Gateway API HTTPRoute.spec.hostnames supports at most {HttpRouteHostnameLimit} entries. " +
+                $"Define explicit host-scoped routes with WithRoute(hostname, path, endpoint) so each HTTPRoute stays within the limit. " +
+                $"See the Kubernetes Gateway API documentation: {HttpRouteSpecDocumentationUrl}");
+        }
 
         var routesByHost = gatewayResource.Routes.GroupBy(r => r.Host ?? string.Empty);
 
@@ -1152,7 +1220,15 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
                 Metadata = { Name = routeName }
             };
 
-            httpRoute.Spec.ParentRefs.Add(new HttpRouteParentRefV1 { Name = gatewayName });
+            // For an existing Gateway the parentRef also carries namespace/sectionName so the route can
+            // attach to a cross-namespace, platform-owned Gateway. For a generated Gateway these stay
+            // null so the emitted parentRef is name-only (byte-unchanged from before this feature).
+            httpRoute.Spec.ParentRefs.Add(new HttpRouteParentRefV1
+            {
+                Name = parentRefName,
+                Namespace = parentRefNamespace,
+                SectionName = parentRefSectionName
+            });
 
             if (!string.IsNullOrEmpty(hostGroup.Key))
             {
@@ -1188,6 +1264,28 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
                         Value = route.Path
                     }
                 });
+
+                // A rewritePrefix rewrites the request path before it reaches the backend, e.g. a route
+                // mounted at "/my-app" can present the backend with "/". Emitted as a Gateway API
+                // URLRewrite filter, which must appear after `matches` and before `backendRefs` — the
+                // order Istio and most controllers expect. See:
+                // https://gateway-api.sigs.k8s.io/api-types/httproute/#filters-optional
+                if (route.RewritePrefix is { } rewritePrefix)
+                {
+                    rule.Filters.Add(new HttpRouteFilterV1
+                    {
+                        Type = "URLRewrite",
+                        UrlRewrite = new HttpUrlRewriteFilterV1
+                        {
+                            Path = new HttpPathModifierV1
+                            {
+                                Type = "ReplacePrefixMatch",
+                                ReplacePrefixMatch = rewritePrefix
+                            }
+                        }
+                    });
+                }
+
                 rule.BackendRefs.Add(backendRef);
                 httpRoute.Spec.Rules.Add(rule);
             }
@@ -1251,7 +1349,11 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
 
         var gateways = model.Resources
             .OfType<KubernetesGatewayResource>()
-            .Where(g => g.Parent == environment && g.ShouldMaterialize);
+            // Existing gateways are platform-owned: their listeners, TLS, and allowedRoutes live
+            // outside this deployment, so no bootstrap TLS secret is provisioned for them.
+            .Where(g => g.Parent == environment
+                && g.ShouldMaterialize
+                && !g.TryGetLastAnnotation<ExistingKubernetesGatewayAnnotation>(out _));
 
         foreach (var gateway in gateways)
         {
@@ -1293,8 +1395,10 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
         // chart. GeneratedIngress is the authoritative signal for whether it rendered.
         KubernetesIngressResource ingress => ingress.GeneratedIngress is not null,
 
-        // BuildGatewayObjects always emits the Gateway once it has routes, so ShouldMaterialize
-        // (already applied during collection) is sufficient for gateways.
+        // BuildGatewayObjects emits the Gateway for every gateway that reaches this point: a gateway
+        // marked AsExisting() never requests a TLS secret in the first place (its listeners and their
+        // TLS belong to the platform), so ShouldMaterialize — already applied during collection — is
+        // sufficient here.
         _ => true,
     };
 
@@ -1310,7 +1414,10 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
 
         var gateways = model.Resources
             .OfType<KubernetesGatewayResource>()
-            .Where(g => g.Parent == environment && g.ShouldMaterialize);
+            // Existing gateways are platform-owned; their FQDN and TLS are not discovered or patched here.
+            .Where(g => g.Parent == environment
+                && g.ShouldMaterialize
+                && !g.TryGetLastAnnotation<ExistingKubernetesGatewayAnnotation>(out _));
 
         foreach (var gateway in gateways)
         {
@@ -1339,7 +1446,10 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
 
         var gateways = model.Resources
             .OfType<KubernetesGatewayResource>()
-            .Where(g => g.Parent == environment && g.ShouldMaterialize);
+            // Existing gateways are platform-owned; we never claim field-manager ownership of them.
+            .Where(g => g.Parent == environment
+                && g.ShouldMaterialize
+                && !g.TryGetLastAnnotation<ExistingKubernetesGatewayAnnotation>(out _));
 
         foreach (var gateway in gateways)
         {

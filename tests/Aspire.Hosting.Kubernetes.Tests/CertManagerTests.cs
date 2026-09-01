@@ -233,9 +233,53 @@ public class CertManagerTests
 
         Assert.Equal(
             "ClusterIssuer 'le-prod' has an HTTP-01 solver but no Gateway in environment 'env' is both annotated with " +
-            "cert-manager.io/cluster-issuer=le-prod and configured with at least one route. cert-manager will not be able to " +
-            "satisfy ACME challenges until at least one routed Gateway adopts this issuer (e.g. via WithRoute(...) and WithTls(issuer)).",
+            "cert-manager.io/cluster-issuer=le-prod and eligible to host the solver route. An eligible Gateway must have at least one " +
+            "route and must not be marked AsExisting(...), because a platform-owned Gateway is not created by Aspire. cert-manager will not " +
+            "be able to satisfy ACME challenges until at least one such Gateway adopts this issuer (e.g. via WithRoute(...) and WithTls(issuer)).",
             warning.Message);
+    }
+
+    [Fact]
+    public async Task BuildClusterIssuerManifest_ExistingGateway_IsNotUsedAsSolverParent()
+    {
+        // An AsExisting(...) Gateway is owned by the platform, so Aspire never emits it. Pointing the
+        // ACME solver route at it would produce a parentRef Aspire cannot guarantee resolves, so the
+        // Gateway must be skipped and the user warned rather than silently given a broken solver.
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        var k8s = builder.AddKubernetesEnvironment("env");
+        var issuer = k8s.AddCertManager("cert-manager")
+            .AddIssuer("le-prod")
+            .WithLetsEncryptProduction("ops@contoso.com")
+            .WithHttp01Solver();
+
+        var api = builder.AddContainer("myapi", "nginx")
+            .WithHttpEndpoint(targetPort: 8080)
+            .WithExternalHttpEndpoints();
+
+        k8s.AddGateway("public")
+            .AsExisting("platform-gateway", "infra")
+            .WithRoute("/", api.GetEndpoint("http"))
+            .WithTls(issuer);
+
+        using var app = builder.Build();
+        var model = app.Services.GetRequiredService<DistributedApplicationModel>();
+        var certManagerResource = model.Resources.OfType<CertManagerResource>().Single();
+        var issuerResource = certManagerResource.Issuers.Single();
+
+        var testSink = new TestSink();
+        using var loggerProvider = new TestLoggerProvider(testSink);
+
+        var yaml = await CertManagerExtensions.BuildClusterIssuerManifestAsync(
+            model,
+            certManagerResource,
+            issuerResource,
+            loggerProvider.CreateLogger("test"),
+            TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain("parentRefs:", yaml);
+        Assert.Contains(
+            testSink.Writes,
+            w => w.LogLevel == LogLevel.Warning && w.Message!.Contains("must not be marked AsExisting(...)", StringComparison.Ordinal));
     }
 
     [Fact]
