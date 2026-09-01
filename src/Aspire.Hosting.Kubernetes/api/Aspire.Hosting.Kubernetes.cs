@@ -83,7 +83,10 @@ namespace Aspire.Hosting
         [AspireExport]
         public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> AddGateway(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesEnvironmentResource> builder, string name) { throw null; }
 
-        [AspireExport]
+        [AspireExportIgnore(Reason = "Polyglot AppHosts use the union-based asExisting dispatcher export.")]
+        public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> AsExisting(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> name, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource>? @namespace = null, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource>? sectionName = null) { throw null; }
+
+        [AspireExportIgnore(Reason = "Polyglot AppHosts use the union-based asExisting dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> AsExisting(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string name, string? @namespace = null, string? sectionName = null) { throw null; }
 
         [AspireExport("withGatewayAnnotationParam")]

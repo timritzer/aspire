@@ -1044,8 +1044,55 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
         var gatewayName = gatewayResource.Name.ToKubernetesResourceName();
 
         // The parentRef name for a generated Gateway is our resource name (kubernetes-normalized). For
-        // an existing Gateway it is the user-supplied name of the cluster object, used verbatim.
-        var parentRefName = isExisting ? existingGateway!.Name : gatewayName;
+        // an existing Gateway it is the user-supplied name of the cluster object, used verbatim. The
+        // identity parts are resolved through the same expression pipeline as every other user-supplied
+        // value so that parameter-backed names surface as Helm values in the generated chart.
+        var parentRefName = isExisting
+            ? await ResolveExpressionAsync(existingGateway!.Name, gatewayResource.Name, cancellationToken).ConfigureAwait(false)
+            : gatewayName;
+
+        var parentRefNamespace = existingGateway?.Namespace is null
+            ? null
+            : await ResolveExpressionAsync(existingGateway.Namespace, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
+
+        var parentRefSectionName = existingGateway?.SectionName is null
+            ? null
+            : await ResolveExpressionAsync(existingGateway.SectionName, gatewayResource.Name, cancellationToken).ConfigureAwait(false);
+
+        if (isExisting)
+        {
+            // Silently discarding these would be worse than not offering them: each one configures the
+            // Gateway object, which the platform owns here, so the intent cannot be honoured. Warn rather
+            // than throw because AsExisting() and the calls below are independent and may appear in either
+            // order — and because a provider package (for example Azure Application Gateway for Containers)
+            // can populate GatewayAnnotations without the app author naming them directly.
+            List<string> ignored = [];
+
+            if (gatewayResource.GatewayClassName is not null)
+            {
+                ignored.Add("gateway class");
+            }
+
+            if (gatewayResource.TlsConfigs.Count > 0)
+            {
+                ignored.Add("TLS configuration");
+            }
+
+            if (gatewayResource.GatewayAnnotations.Count > 0)
+            {
+                ignored.Add("gateway annotations");
+            }
+
+            if (ignored.Count > 0)
+            {
+                logger.LogWarning(
+                    "Gateway '{GatewayName}' is marked AsExisting(), so Aspire does not create a Gateway object for it. " +
+                    "The following configuration applies to the Gateway itself and will be ignored: {IgnoredConfiguration}. " +
+                    "Configure these on the platform-owned Gateway instead.",
+                    gatewayResource.Name,
+                    string.Join(", ", ignored));
+            }
+        }
 
         // Configured hostnames feed two distinct consumers: the listeners of a Gateway we generate, and
         // HTTPRoute.spec.hostnames on every route we generate. Only the former is a Gateway-owner
@@ -1179,8 +1226,8 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
             httpRoute.Spec.ParentRefs.Add(new HttpRouteParentRefV1
             {
                 Name = parentRefName,
-                Namespace = existingGateway?.Namespace,
-                SectionName = existingGateway?.SectionName
+                Namespace = parentRefNamespace,
+                SectionName = parentRefSectionName
             });
 
             if (!string.IsNullOrEmpty(hostGroup.Key))
@@ -1348,8 +1395,10 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
         // chart. GeneratedIngress is the authoritative signal for whether it rendered.
         KubernetesIngressResource ingress => ingress.GeneratedIngress is not null,
 
-        // BuildGatewayObjects always emits the Gateway once it has routes, so ShouldMaterialize
-        // (already applied during collection) is sufficient for gateways.
+        // BuildGatewayObjects emits the Gateway for every gateway that reaches this point: a gateway
+        // marked AsExisting() never requests a TLS secret in the first place (its listeners and their
+        // TLS belong to the platform), so ShouldMaterialize — already applied during collection — is
+        // sufficient here.
         _ => true,
     };
 

@@ -997,6 +997,66 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task KubernetesExistingGatewayCapturesParameterIdentityAsHelmValues()
+    {
+        // The gateway a route attaches to is usually environment-specific, so its name/namespace/
+        // sectionName must be parameterizable. All three run through the same expression pipeline as
+        // every other user-supplied value, so a parameter-backed identity has to render as a Helm
+        // reference in the parentRef and be declared in values.yaml — otherwise `helm template`
+        // substitutes <no value> and the route silently attaches to nothing.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+
+        // No default value: ShouldCaptureAsHelmValue only captures parameters whose Default is null,
+        // so a defaulted parameter would be inlined as a literal and never reach the capture path.
+        var namePart = $"gwname{Guid.NewGuid():N}";
+        var namespacePart = $"gwns{Guid.NewGuid():N}";
+        var gatewayNameParam = builder.AddParameter(namePart);
+        var gatewayNamespaceParam = builder.AddParameter(namespacePart);
+
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting(gatewayNameParam, gatewayNamespaceParam, sectionName: "https");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        var gatewayObjectPath = Path.Combine(workspace.Path, "templates", "gateway", "gateway.yaml");
+        Assert.False(File.Exists(gatewayObjectPath), "No Gateway object should be emitted when attaching to an existing gateway.");
+
+        var routePath = Path.Combine(workspace.Path, "templates", "gateway", "route.yaml");
+        Assert.True(File.Exists(routePath), $"Expected HTTPRoute manifest at {routePath}");
+        var routeContent = await File.ReadAllTextAsync(routePath);
+
+        // Must be Helm references, not raw ReferenceExpression placeholders or inlined literals.
+        Assert.DoesNotContain("\"{0}\"", routeContent);
+        Assert.Contains($"{{{{ .Values.parameters.gateway.{namePart} }}}}", routeContent);
+        Assert.Contains($"{{{{ .Values.parameters.gateway.{namespacePart} }}}}", routeContent);
+        // A literal sectionName alongside parameter-backed parts must still render verbatim.
+        Assert.Contains("sectionName: \"https\"", routeContent);
+
+        var valuesPath = Path.Combine(workspace.Path, "values.yaml");
+        Assert.True(File.Exists(valuesPath), $"Expected values.yaml at {valuesPath}");
+        var valuesContent = await File.ReadAllTextAsync(valuesPath);
+
+        Assert.Matches(
+            new System.Text.RegularExpressions.Regex(@"parameters:[\s\S]+gateway:[\s\S]+" +
+                System.Text.RegularExpressions.Regex.Escape(namePart) + @"\s*:"),
+            valuesContent);
+        Assert.Matches(
+            new System.Text.RegularExpressions.Regex(@"parameters:[\s\S]+gateway:[\s\S]+" +
+                System.Text.RegularExpressions.Regex.Escape(namespacePart) + @"\s*:"),
+            valuesContent);
+    }
+
+    [Fact]
     public async Task KubernetesProbeUsesContainerTargetPortNotServicePort()
     {
         // Guards EndpointProperty.TargetPort => GetPort(targetPort) in KubernetesResource.GetEndpointValue.

@@ -113,7 +113,7 @@ public sealed class HttpRouteRuleV1
     /// Gets the match conditions for this rule. A request must satisfy all conditions
     /// in at least one match to be routed by this rule.
     /// </summary>
-    [YamlMember(Alias = "matches")]
+    [YamlMember(Alias = "matches", Order = 1)]
     public List<HttpRouteMatchV1> Matches { get; } = [];
 
     /// <summary>
@@ -122,17 +122,20 @@ public sealed class HttpRouteRuleV1
     /// that rewrites the path).
     /// </summary>
     /// <remarks>
-    /// This is emitted after <c>matches</c> and before <c>backendRefs</c>, which is the ordering the
-    /// Gateway API defines and most controllers (including Istio) expect. See
+    /// Kubernetes parses manifests into typed objects, so mapping key order carries no semantic meaning
+    /// to a controller. The explicit <c>Order</c> values exist because the YAML serializer otherwise
+    /// falls back to reflection order, which .NET does not contractually guarantee: pinning the order
+    /// keeps generated manifests deterministic (and their snapshots stable) and matches the field order
+    /// used by the Gateway API reference documentation, which makes rendered charts easier to read. See
     /// <see href="https://gateway-api.sigs.k8s.io/api-types/httproute/#filters-optional"/>.
     /// </remarks>
-    [YamlMember(Alias = "filters")]
+    [YamlMember(Alias = "filters", Order = 2)]
     public List<HttpRouteFilterV1> Filters { get; } = [];
 
     /// <summary>
     /// Gets the backend references that matched requests are forwarded to.
     /// </summary>
-    [YamlMember(Alias = "backendRefs")]
+    [YamlMember(Alias = "backendRefs", Order = 3)]
     public List<HttpRouteBackendRefV1> BackendRefs { get; } = [];
 }
 
@@ -231,8 +234,10 @@ public sealed class HttpRouteBackendRefV1
 public sealed class HttpRouteFilterV1
 {
     /// <summary>
-    /// Gets or sets the filter type. The Gateway API core types include <c>URLRewrite</c>,
-    /// <c>RequestRedirect</c>, <c>RequestHeaderModifier</c>, and <c>ResponseHeaderModifier</c>.
+    /// Gets or sets the filter type. The Gateway API defines <c>RequestHeaderModifier</c> and
+    /// <c>RequestRedirect</c> at Core support level, <c>ResponseHeaderModifier</c>, <c>RequestMirror</c>,
+    /// and <c>URLRewrite</c> at Extended support level, and <c>ExtensionRef</c> as
+    /// implementation-specific. Confirm your controller supports the chosen type.
     /// </summary>
     [YamlMember(Alias = "type")]
     public string Type { get; set; } = null!;
