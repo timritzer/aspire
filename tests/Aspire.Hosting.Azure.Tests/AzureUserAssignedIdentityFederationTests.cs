@@ -3,7 +3,6 @@
 
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Utils;
-using Azure.Provisioning;
 using Microsoft.Extensions.DependencyInjection;
 using static Aspire.Hosting.Utils.AzureManifestUtils;
 
@@ -33,27 +32,54 @@ public class AzureUserAssignedIdentityFederationTests
 
     /// <summary>
     /// The load-bearing case: a compute environment that provisions no cluster supplies the issuer as an
-    /// unresolved Bicep expression, which must survive to the template rather than being flattened to a
-    /// literal.
+    /// application parameter, which must reach the template as an unresolved Bicep parameter AND be bound
+    /// in the manifest so a value is actually supplied at deployment time.
     /// </summary>
     [Fact]
-    public async Task WithKubernetesServiceAccountFederation_FlowsIssuerExpressionThrough()
+    public async Task WithKubernetesServiceAccountFederation_FlowsParameterThrough()
     {
         var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
 
-        var issuerParameter = new ProvisioningParameter("oidcIssuerUrl", typeof(string));
+        var issuer = builder.AddParameter("oidc-issuer-url");
 
         builder.AddAzureUserAssignedIdentity("myidentity")
-               .ConfigureInfrastructure(infrastructure => infrastructure.Add(issuerParameter))
-               .WithKubernetesServiceAccountFederation(issuerParameter, "my-namespace", "my-workload");
+               .WithKubernetesServiceAccountFederation(issuer, "my-namespace", "my-workload");
 
         using var app = builder.Build();
         var model = app.Services.GetRequiredService<DistributedApplicationModel>();
         var resource = Assert.Single(model.Resources.OfType<AzureUserAssignedIdentityResource>());
 
-        var (_, bicep) = await GetManifestWithBicep(resource);
+        var (manifest, bicep) = await GetManifestWithBicep(resource);
 
-        await Verify(bicep, extension: "bicep");
+        // The manifest binding is the half that a bicep-only assertion cannot see, and the half that was
+        // missing when this took a raw BicepValue: the module declared a required parameter that nothing
+        // ever supplied.
+        await Verify(manifest.ToString(), extension: "json")
+            .AppendContentAsFile(bicep, "bicep");
+    }
+
+    /// <summary>
+    /// An issuer taken from another resource's output — for example an existing AKS cluster's
+    /// <c>OidcIssuerUrl</c> — flows through the same parameter binding.
+    /// </summary>
+    [Fact]
+    public async Task WithKubernetesServiceAccountFederation_FlowsOutputReferenceThrough()
+    {
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+
+        var cluster = builder.AddAzureInfrastructure("cluster", _ => { });
+
+        builder.AddAzureUserAssignedIdentity("myidentity")
+               .WithKubernetesServiceAccountFederation(cluster.GetOutput("oidcIssuerUrl"), "my-namespace", "my-workload");
+
+        using var app = builder.Build();
+        var model = app.Services.GetRequiredService<DistributedApplicationModel>();
+        var resource = Assert.Single(model.Resources.OfType<AzureUserAssignedIdentityResource>());
+
+        var (manifest, bicep) = await GetManifestWithBicep(resource);
+
+        await Verify(manifest.ToString(), extension: "json")
+            .AppendContentAsFile(bicep, "bicep");
     }
 
     [Fact]
@@ -198,9 +224,8 @@ public class AzureUserAssignedIdentityFederationTests
     }
 
     /// <summary>
-    /// BicepValue&lt;string&gt; converts implicitly from string, so a null or empty issuer arrives as a
-    /// non-null BicepValue and would otherwise emit <c>issuer: ''</c> — a template that compiles cleanly
-    /// and can never complete token exchange.
+    /// An issuer that carries no value would emit <c>issuer: ''</c> — a template that compiles cleanly
+    /// and can never complete token exchange — so every overload rejects it up front.
     /// </summary>
     [Fact]
     public void WithKubernetesServiceAccountFederation_ThrowsOnEmptyIssuer()
@@ -209,17 +234,47 @@ public class AzureUserAssignedIdentityFederationTests
 
         var identity = builder.AddAzureUserAssignedIdentity("myidentity");
 
-        // An empty or null string survives the implicit conversion as a non-null BicepValue carrying
-        // nothing, so it is rejected by the value check rather than by ThrowIfNull.
         Assert.Throws<ArgumentException>(() =>
             identity.WithKubernetesServiceAccountFederation("", "my-namespace", "my-workload"));
 
-        Assert.Throws<ArgumentException>(() =>
+        // ArgumentException.ThrowIfNullOrEmpty distinguishes the two: null throws ArgumentNullException.
+        Assert.Throws<ArgumentNullException>(() =>
             identity.WithKubernetesServiceAccountFederation((string)null!, "my-namespace", "my-workload"));
 
-        // A null BicepValue reference is a genuine null argument.
         Assert.Throws<ArgumentNullException>(() =>
-            identity.WithKubernetesServiceAccountFederation(default(BicepValue<string>)!, "my-namespace", "my-workload"));
+            identity.WithKubernetesServiceAccountFederation((IResourceBuilder<ParameterResource>)null!, "my-namespace", "my-workload"));
+
+        Assert.Throws<ArgumentNullException>(() =>
+            identity.WithKubernetesServiceAccountFederation((IManifestExpressionProvider)null!, "my-namespace", "my-workload"));
+    }
+
+    /// <summary>
+    /// The polyglot dispatcher is the only ATS-exported entry point; the typed overloads opt out. It must
+    /// accept both union members and reject anything else.
+    /// </summary>
+    [Fact]
+    public async Task WithKubernetesServiceAccountFederationForPolyglot_DispatchesBothUnionMembers()
+    {
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+
+        var issuer = builder.AddParameter("oidc-issuer-url");
+
+        builder.AddAzureUserAssignedIdentity("literal")
+               .WithKubernetesServiceAccountFederationForPolyglot("https://oidc.example.com/cluster/", "my-namespace", "my-workload");
+
+        var parameterIdentity = builder.AddAzureUserAssignedIdentity("parameterized")
+               .WithKubernetesServiceAccountFederationForPolyglot(issuer, "my-namespace", "my-workload");
+
+        Assert.Throws<ArgumentException>(() =>
+            parameterIdentity.WithKubernetesServiceAccountFederationForPolyglot(42, "my-namespace", "other-workload"));
+
+        using var app = builder.Build();
+        var model = app.Services.GetRequiredService<DistributedApplicationModel>();
+        var literal = model.Resources.OfType<AzureUserAssignedIdentityResource>().Single(r => r.Name == "literal");
+
+        var (_, bicep) = await GetManifestWithBicep(literal);
+
+        Assert.Contains("issuer: 'https://oidc.example.com/cluster/'", bicep);
     }
 
     [Theory]
