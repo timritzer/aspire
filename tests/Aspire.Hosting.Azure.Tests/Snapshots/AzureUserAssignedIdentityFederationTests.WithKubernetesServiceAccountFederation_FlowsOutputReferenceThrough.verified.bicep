@@ -1,7 +1,7 @@
 ﻿@description('The location for the resource(s) to be deployed.')
 param location string = resourceGroup().location
 
-param oidcIssuerUrl string
+param cluster_outputs_oidcissuerurl string
 
 resource myidentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
   name: take('myidentity-${uniqueString(resourceGroup().id)}', 128)
@@ -14,7 +14,7 @@ resource fedcred_my_namespace_my_workload_fedcred 'Microsoft.ManagedIdentity/use
     audiences: [
       'api://AzureADTokenExchange'
     ]
-    issuer: oidcIssuerUrl
+    issuer: cluster_outputs_oidcissuerurl
     subject: 'system:serviceaccount:my-namespace:my-workload'
   }
   parent: myidentity

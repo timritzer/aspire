@@ -7,6 +7,7 @@ using System.Text;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Azure.Utils;
 using Azure.Provisioning;
+using Azure.Provisioning.Expressions;
 using Azure.Provisioning.Roles;
 
 namespace Aspire.Hosting.Azure;
@@ -90,9 +91,9 @@ public static class AzureUserAssignedIdentityExtensions
     /// <param name="kubernetesNamespace">The namespace containing the Kubernetes service account.</param>
     /// <param name="serviceAccountName">The name of the Kubernetes service account.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{AzureUserAssignedIdentityResource}"/> builder.</returns>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="identity"/> or <paramref name="oidcIssuerUrl"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="identity"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// Thrown when <paramref name="oidcIssuerUrl"/> carries no value, or when
+    /// Thrown when <paramref name="oidcIssuerUrl"/> is null or empty, or when
     /// <paramref name="kubernetesNamespace"/> or <paramref name="serviceAccountName"/> is not a valid
     /// Kubernetes name.
     /// </exception>
@@ -121,14 +122,11 @@ public static class AzureUserAssignedIdentityExtensions
     /// </para>
     /// </remarks>
     /// <example>
-    /// Federate a service account against an issuer supplied as a parameter, and create the matching
-    /// service account in the generated chart:
     /// <code>
-    /// var issuer = builder.AddParameter("oidc-issuer-url");
     /// var identity = builder.AddAzureUserAssignedIdentity("workload-identity");
     ///
     /// identity.WithKubernetesServiceAccountFederation(
-    ///     oidcIssuerUrl: issuer.AsProvisioningParameter(infrastructure),
+    ///     oidcIssuerUrl: "https://oidc.example.com/cluster/",
     ///     kubernetesNamespace: "my-namespace",
     ///     serviceAccountName: "my-workload");
     ///
@@ -139,30 +137,168 @@ public static class AzureUserAssignedIdentityExtensions
     /// //   podTemplate.Metadata.Labels["azure.workload.identity/use"] = "true";
     /// </code>
     /// </example>
-    // Not exported to polyglot app hosts: BicepValue<string> has no ATS representation (ASPIREEXPORT008),
-    // and accepting an arbitrary Bicep expression for the issuer is the point of this signature.
-    [AspireExportIgnore(Reason = "BicepValue<string> has no ATS representation; the parameter exists to accept an unresolved Bicep expression for the OIDC issuer.")]
+    [AspireExportIgnore(Reason = "Use the polyglot withKubernetesServiceAccountFederation overload that accepts string or ParameterResource values instead.")]
     public static IResourceBuilder<AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederation(
         this IResourceBuilder<AzureUserAssignedIdentityResource> identity,
-        BicepValue<string> oidcIssuerUrl,
+        string oidcIssuerUrl,
+        string kubernetesNamespace,
+        string serviceAccountName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(oidcIssuerUrl);
+
+        // A literal needs no Bicep parameter, so it is written straight into the template.
+        return WithKubernetesServiceAccountFederationCore(
+            identity,
+            _ => new StringLiteralExpression(oidcIssuerUrl),
+            kubernetesNamespace,
+            serviceAccountName);
+    }
+
+    /// <summary>
+    /// Emits a federated identity credential allowing the Kubernetes service account
+    /// <c>system:serviceaccount:{kubernetesNamespace}:{serviceAccountName}</c> to obtain Microsoft Entra
+    /// tokens as <paramref name="identity"/>, taking the issuer from an application parameter.
+    /// </summary>
+    /// <param name="identity">The builder for the <see cref="AzureUserAssignedIdentityResource"/> to federate.</param>
+    /// <param name="oidcIssuerUrl">A parameter supplying the OIDC issuer URL of the cluster.</param>
+    /// <param name="kubernetesNamespace">The namespace containing the Kubernetes service account.</param>
+    /// <param name="serviceAccountName">The name of the Kubernetes service account.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{AzureUserAssignedIdentityResource}"/> builder.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="identity"/> or <paramref name="oidcIssuerUrl"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// Thrown when <paramref name="kubernetesNamespace"/> or <paramref name="serviceAccountName"/> is not
+    /// a valid Kubernetes name.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when the identity cannot be resolved, or when a different service account already occupies
+    /// the same generated credential name.
+    /// </exception>
+    /// <remarks>
+    /// The parameter is emitted as a Bicep parameter on the identity's module and bound to the
+    /// application parameter, so its value is supplied at deployment time.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// var issuer = builder.AddParameter("oidc-issuer-url");
+    /// var identity = builder.AddAzureUserAssignedIdentity("workload-identity");
+    ///
+    /// identity.WithKubernetesServiceAccountFederation(issuer, "my-namespace", "my-workload");
+    /// </code>
+    /// </example>
+    [AspireExportIgnore(Reason = "Use the polyglot withKubernetesServiceAccountFederation overload that accepts string or ParameterResource values instead.")]
+    public static IResourceBuilder<AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederation(
+        this IResourceBuilder<AzureUserAssignedIdentityResource> identity,
+        IResourceBuilder<ParameterResource> oidcIssuerUrl,
+        string kubernetesNamespace,
+        string serviceAccountName)
+    {
+        ArgumentNullException.ThrowIfNull(oidcIssuerUrl);
+
+        return WithKubernetesServiceAccountFederationCore(
+            identity,
+            infrastructure => oidcIssuerUrl.AsProvisioningParameter(infrastructure),
+            kubernetesNamespace,
+            serviceAccountName);
+    }
+
+    /// <summary>
+    /// Emits a federated identity credential allowing the Kubernetes service account
+    /// <c>system:serviceaccount:{kubernetesNamespace}:{serviceAccountName}</c> to obtain Microsoft Entra
+    /// tokens as <paramref name="identity"/>, taking the issuer from another resource's value.
+    /// </summary>
+    /// <param name="identity">The builder for the <see cref="AzureUserAssignedIdentityResource"/> to federate.</param>
+    /// <param name="oidcIssuerUrl">
+    /// A value supplying the OIDC issuer URL, such as the <c>OidcIssuerUrl</c> output of an existing
+    /// Azure Kubernetes Service cluster.
+    /// </param>
+    /// <param name="kubernetesNamespace">The namespace containing the Kubernetes service account.</param>
+    /// <param name="serviceAccountName">The name of the Kubernetes service account.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{AzureUserAssignedIdentityResource}"/> builder.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="identity"/> or <paramref name="oidcIssuerUrl"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// Thrown when <paramref name="kubernetesNamespace"/> or <paramref name="serviceAccountName"/> is not
+    /// a valid Kubernetes name.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when the identity cannot be resolved, or when a different service account already occupies
+    /// the same generated credential name.
+    /// </exception>
+    /// <remarks>
+    /// The value is emitted as a Bicep parameter on the identity's module and bound to the supplied
+    /// expression, so it is resolved at deployment time.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// var cluster = builder.AddAzureKubernetesEnvironment("aks");
+    /// var identity = builder.AddAzureUserAssignedIdentity("workload-identity");
+    ///
+    /// identity.WithKubernetesServiceAccountFederation(
+    ///     cluster.Resource.OidcIssuerUrl, "my-namespace", "my-workload");
+    /// </code>
+    /// </example>
+    [AspireExportIgnore(Reason = "IManifestExpressionProvider parameters are not ATS-compatible. Use the polyglot withKubernetesServiceAccountFederation overload that accepts string or ParameterResource values instead.")]
+    public static IResourceBuilder<AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederation(
+        this IResourceBuilder<AzureUserAssignedIdentityResource> identity,
+        IManifestExpressionProvider oidcIssuerUrl,
+        string kubernetesNamespace,
+        string serviceAccountName)
+    {
+        ArgumentNullException.ThrowIfNull(oidcIssuerUrl);
+
+        return WithKubernetesServiceAccountFederationCore(
+            identity,
+            infrastructure => oidcIssuerUrl.AsProvisioningParameter(infrastructure),
+            kubernetesNamespace,
+            serviceAccountName);
+    }
+
+    /// <summary>
+    /// Emits a federated identity credential linking a Kubernetes service account to a user assigned identity.
+    /// </summary>
+    /// <param name="identity">The builder for the <see cref="AzureUserAssignedIdentityResource"/> to federate.</param>
+    /// <param name="oidcIssuerUrl">The OIDC issuer URL as a string or parameter resource.</param>
+    /// <param name="kubernetesNamespace">The namespace containing the Kubernetes service account.</param>
+    /// <param name="serviceAccountName">The name of the Kubernetes service account.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{AzureUserAssignedIdentityResource}"/> builder.</returns>
+    [AspireExport("withKubernetesServiceAccountFederation")]
+    internal static IResourceBuilder<AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederationForPolyglot(
+        this IResourceBuilder<AzureUserAssignedIdentityResource> identity,
+        [AspireUnion(typeof(string), typeof(IResourceBuilder<ParameterResource>))] object oidcIssuerUrl,
+        string kubernetesNamespace,
+        string serviceAccountName)
+    {
+        ArgumentNullException.ThrowIfNull(oidcIssuerUrl);
+
+        return oidcIssuerUrl switch
+        {
+            string issuerValue => identity.WithKubernetesServiceAccountFederation(issuerValue, kubernetesNamespace, serviceAccountName),
+            IResourceBuilder<ParameterResource> issuerParameter => identity.WithKubernetesServiceAccountFederation(issuerParameter, kubernetesNamespace, serviceAccountName),
+            _ => throw new ArgumentException(
+                "The OIDC issuer URL must be a string or a parameter resource builder.",
+                nameof(oidcIssuerUrl))
+        };
+    }
+
+    /// <summary>
+    /// Shared implementation for the <c>WithKubernetesServiceAccountFederation</c> overloads.
+    /// </summary>
+    /// <param name="identity">The identity to federate.</param>
+    /// <param name="resolveIssuer">
+    /// Produces the issuer value once the module's infrastructure exists. Deferred because the
+    /// parameter-backed overloads must register a Bicep parameter on that infrastructure, which also binds
+    /// the value into the module's parameter map so it is supplied at deployment time.
+    /// </param>
+    /// <param name="kubernetesNamespace">The namespace containing the Kubernetes service account.</param>
+    /// <param name="serviceAccountName">The name of the Kubernetes service account.</param>
+    private static IResourceBuilder<AzureUserAssignedIdentityResource> WithKubernetesServiceAccountFederationCore(
+        IResourceBuilder<AzureUserAssignedIdentityResource> identity,
+        Func<AzureResourceInfrastructure, BicepValue<Uri>> resolveIssuer,
         string kubernetesNamespace,
         string serviceAccountName)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        ArgumentNullException.ThrowIfNull(oidcIssuerUrl);
         ArgumentException.ThrowIfNullOrEmpty(kubernetesNamespace);
         ArgumentException.ThrowIfNullOrEmpty(serviceAccountName);
-
-        // BicepValue<string> converts implicitly from string, so a null or empty string argument arrives
-        // as a non-null BicepValue carrying nothing and slips past ThrowIfNull above. Left alone it emits
-        // `issuer: ''`, which compiles without a single Bicep diagnostic and can never complete token
-        // exchange. An unresolved expression cannot be inspected, so only literals are checked.
-        var issuer = (IBicepValue)oidcIssuerUrl;
-        if (issuer.Kind == BicepValueKind.Unset ||
-            (issuer.Kind == BicepValueKind.Literal && string.IsNullOrEmpty(oidcIssuerUrl.Value)))
-        {
-            throw new ArgumentException("The OIDC issuer URL must have a value.", nameof(oidcIssuerUrl));
-        }
 
         // RFC 1123: a namespace is a DNS label, a service account name is a DNS subdomain (dots allowed).
         // https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
@@ -213,11 +349,10 @@ public static class AzureUserAssignedIdentityExtensions
                 bicepIdentifier: credentialIdentifier,
                 name: credentialName,
                 parent: userAssignedIdentity,
-                // Compile() rather than converting through System.Uri: Uri would normalize the value (for
+                // The issuer is never routed through System.Uri: Uri would normalize the value (for
                 // example appending a trailing slash to an authority-only URL) and Entra compares the
-                // issuer against the token's `iss` claim byte for byte. Compile() also keeps a
-                // caller-supplied Bicep expression intact instead of forcing it to a literal.
-                issuerUri: oidcIssuerUrl.Compile(),
+                // issuer against the token's `iss` claim byte for byte.
+                issuerUri: resolveIssuer(infrastructure),
                 kubernetesNamespace: kubernetesNamespace,
                 serviceAccountName: serviceAccountName));
         });
