@@ -21,6 +21,7 @@
     <Compile Include="$(SharedDir)StringUtils.cs" Link="Utils\StringUtils.cs" />
     <Compile Include="$(SharedDir)Model\KnownRelationshipTypes.cs" />
     <Compile Include="$(SharedDir)PathLookupHelper.cs" Link="Utils\PathLookupHelper.cs" />
+    <Compile Include="$(SharedDir)KubernetesFederatedIdentityCredentialFactory.cs" Link="Utils\KubernetesFederatedIdentityCredentialFactory.cs" />
   </ItemGroup>
 
   <ItemGroup>
