@@ -264,12 +264,6 @@ public static class KubernetesGatewayExtensions
     /// <param name="path">The URL path to match (e.g., <c>"/"</c> or <c>"/api"</c>). Must start with <c>/</c>.</param>
     /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
     /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
-    /// <param name="rewritePrefix">
-    /// When set, rewrites the matched path prefix to this value before the request reaches the backend
-    /// (e.g. a route at <c>"/my-app"</c> with <paramref name="rewritePrefix"/> <c>"/"</c> presents the
-    /// backend with <c>"/"</c>). Emitted as a Gateway API <c>URLRewrite</c> filter with a
-    /// <c>ReplacePrefixMatch</c> path modifier.
-    /// </param>
     /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
     /// <ats-returns>The resource builder.</ats-returns>
     [AspireExport("withGatewayPathRoute")]
@@ -277,28 +271,48 @@ public static class KubernetesGatewayExtensions
         this IResourceBuilder<KubernetesGatewayResource> builder,
         string path,
         EndpointReference endpoint,
-        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix,
-        string? rewritePrefix = null)
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ArgumentException.ThrowIfNullOrEmpty(path);
-        ArgumentNullException.ThrowIfNull(endpoint);
 
-        if (!path.StartsWith('/'))
-        {
-            throw new ArgumentException("Path must start with '/'.", nameof(path));
-        }
+        return AddRouteCore(builder, host: null, path, endpoint, pathType, rewritePrefix: null);
+    }
 
-        ValidateRewritePrefix(rewritePrefix, pathType, nameof(rewritePrefix));
+    /// <summary>
+    /// Adds a path-based routing rule that rewrites the matched path prefix before the request reaches
+    /// the backend, so a service mounted under a path prefix on a shared gateway can keep serving its
+    /// own paths unchanged.
+    /// </summary>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="path">The URL path to match (e.g., <c>"/"</c> or <c>"/api"</c>). Must start with <c>/</c>.</param>
+    /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
+    /// <param name="rewritePrefix">
+    /// The value that replaces the matched path prefix. Use <c>"/"</c> to present the backend with a
+    /// root-relative path, or an empty string to strip the matched prefix entirely.
+    /// </param>
+    /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    /// <remarks>
+    /// Emitted as a Gateway API <c>URLRewrite</c> filter with a <c>ReplacePrefixMatch</c> path modifier.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// gateway.WithRoute("/my-app", api.GetEndpoint("http"), rewritePrefix: "/");
+    /// </code>
+    /// </example>
+    [AspireExport("withGatewayPathRouteRewrite")]
+    public static IResourceBuilder<KubernetesGatewayResource> WithRoute(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        string path,
+        EndpointReference endpoint,
+        string rewritePrefix,
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(rewritePrefix);
 
-        builder.Resource.Routes.Add(new GatewayRouteConfig(
-            Host: null,
-            Path: path,
-            PathType: pathType,
-            Endpoint: endpoint,
-            RewritePrefix: rewritePrefix));
-
-        return builder;
+        return AddRouteCore(builder, host: null, path, endpoint, pathType, rewritePrefix);
     }
 
     /// <summary>
@@ -311,12 +325,6 @@ public static class KubernetesGatewayExtensions
     /// <param name="path">The URL path to match. Must start with <c>/</c>.</param>
     /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
     /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
-    /// <param name="rewritePrefix">
-    /// When set, rewrites the matched path prefix to this value before the request reaches the backend
-    /// (e.g. a route at <c>"/my-app"</c> with <paramref name="rewritePrefix"/> <c>"/"</c> presents the
-    /// backend with <c>"/"</c>). Emitted as a Gateway API <c>URLRewrite</c> filter with a
-    /// <c>ReplacePrefixMatch</c> path modifier.
-    /// </param>
     /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
     /// <ats-returns>The resource builder.</ats-returns>
     [AspireExport("withGatewayHostRoute")]
@@ -325,11 +333,61 @@ public static class KubernetesGatewayExtensions
         string host,
         string path,
         EndpointReference endpoint,
-        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix,
-        string? rewritePrefix = null)
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrEmpty(host);
+
+        return AddRouteCore(builder, host, path, endpoint, pathType, rewritePrefix: null);
+    }
+
+    /// <summary>
+    /// Adds a host-and-path-based routing rule that rewrites the matched path prefix before the request
+    /// reaches the backend.
+    /// </summary>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="host">The hostname to match (e.g., <c>"api.example.com"</c>).</param>
+    /// <param name="path">The URL path to match. Must start with <c>/</c>.</param>
+    /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
+    /// <param name="rewritePrefix">
+    /// The value that replaces the matched path prefix. Use <c>"/"</c> to present the backend with a
+    /// root-relative path, or an empty string to strip the matched prefix entirely.
+    /// </param>
+    /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    /// <remarks>
+    /// Emitted as a Gateway API <c>URLRewrite</c> filter with a <c>ReplacePrefixMatch</c> path modifier.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// gateway.WithRoute("api.example.com", "/my-app", api.GetEndpoint("http"), rewritePrefix: "/");
+    /// </code>
+    /// </example>
+    [AspireExport("withGatewayHostRouteRewrite")]
+    public static IResourceBuilder<KubernetesGatewayResource> WithRoute(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        string host,
+        string path,
+        EndpointReference endpoint,
+        string rewritePrefix,
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrEmpty(host);
+        ArgumentNullException.ThrowIfNull(rewritePrefix);
+
+        return AddRouteCore(builder, host, path, endpoint, pathType, rewritePrefix);
+    }
+
+    private static IResourceBuilder<KubernetesGatewayResource> AddRouteCore(
+        IResourceBuilder<KubernetesGatewayResource> builder,
+        string? host,
+        string path,
+        EndpointReference endpoint,
+        GatewayPathMatchType pathType,
+        string? rewritePrefix)
+    {
         ArgumentException.ThrowIfNullOrEmpty(path);
         ArgumentNullException.ThrowIfNull(endpoint);
 

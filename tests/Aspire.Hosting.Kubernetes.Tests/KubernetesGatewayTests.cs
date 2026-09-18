@@ -494,10 +494,10 @@ public class KubernetesGatewayTests(ITestOutputHelper outputHelper)
         var gateway = k8s.AddGateway("gw").WithGatewayClass("nginx");
 
         Assert.Throws<ArgumentException>(
-            () => gateway.WithRoute("/api", api.GetEndpoint("http"), pathType, rewritePrefix: "/"));
+            () => gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: "/", pathType: pathType));
 
         Assert.Throws<ArgumentException>(
-            () => gateway.WithRoute("app.example.com", "/api", api.GetEndpoint("http"), pathType, rewritePrefix: "/"));
+            () => gateway.WithRoute("app.example.com", "/api", api.GetEndpoint("http"), rewritePrefix: "/", pathType: pathType));
     }
 
     [Fact]
