@@ -1300,8 +1300,7 @@ public sealed class KubernetesEnvironmentResource : Resource, IComputeEnvironmen
 
                 // A rewritePrefix rewrites the request path before it reaches the backend, e.g. a route
                 // mounted at "/my-app" can present the backend with "/". Emitted as a Gateway API
-                // URLRewrite filter, which must appear after `matches` and before `backendRefs` — the
-                // order Istio and most controllers expect. See:
+                // URLRewrite filter. See:
                 // https://gateway-api.sigs.k8s.io/api-types/httproute/#filters-optional
                 if (route.RewritePrefix is { } rewritePrefix)
                 {

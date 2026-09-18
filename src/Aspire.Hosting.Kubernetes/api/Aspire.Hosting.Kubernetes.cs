@@ -83,12 +83,6 @@ namespace Aspire.Hosting
         [AspireExport]
         public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> AddGateway(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesEnvironmentResource> builder, string name) { throw null; }
 
-        [AspireExportIgnore(Reason = "Polyglot AppHosts use the union-based asExisting dispatcher export.")]
-        public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> AsExisting(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> name, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource>? @namespace = null, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource>? sectionName = null) { throw null; }
-
-        [AspireExportIgnore(Reason = "Polyglot AppHosts use the union-based asExisting dispatcher export.")]
-        public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> AsExisting(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string name, string? @namespace = null, string? sectionName = null) { throw null; }
-
         [AspireExport("withGatewayAnnotationParam")]
         public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> WithGatewayAnnotation(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string key, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> value) { throw null; }
 
@@ -108,10 +102,10 @@ namespace Aspire.Hosting
         public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> WithHostname(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string hostname) { throw null; }
 
         [AspireExport("withGatewayPathRoute")]
-        public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> WithRoute(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string path, ApplicationModel.EndpointReference endpoint, Kubernetes.GatewayPathMatchType pathType = Kubernetes.GatewayPathMatchType.PathPrefix, string? rewritePrefix = null) { throw null; }
+        public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> WithRoute(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string path, ApplicationModel.EndpointReference endpoint, Kubernetes.GatewayPathMatchType pathType = Kubernetes.GatewayPathMatchType.PathPrefix) { throw null; }
 
         [AspireExport("withGatewayHostRoute")]
-        public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> WithRoute(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string host, string path, ApplicationModel.EndpointReference endpoint, Kubernetes.GatewayPathMatchType pathType = Kubernetes.GatewayPathMatchType.PathPrefix, string? rewritePrefix = null) { throw null; }
+        public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> WithRoute(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, string host, string path, ApplicationModel.EndpointReference endpoint, Kubernetes.GatewayPathMatchType pathType = Kubernetes.GatewayPathMatchType.PathPrefix) { throw null; }
 
         [AspireExport("withGatewayTlsParam")]
         public static ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> WithTls(this ApplicationModel.IResourceBuilder<Kubernetes.KubernetesGatewayResource> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> secretName) { throw null; }
@@ -1377,19 +1371,6 @@ namespace Aspire.Hosting.Kubernetes.Resources
     }
 
     [YamlDotNet.Serialization.YamlSerializable]
-    public sealed partial class HttpPathModifierV1
-    {
-        [YamlDotNet.Serialization.YamlMember(Alias = "replaceFullPath")]
-        public string? ReplaceFullPath { get { throw null; } set { } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "replacePrefixMatch")]
-        public string? ReplacePrefixMatch { get { throw null; } set { } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "type")]
-        public string Type { get { throw null; } set { } }
-    }
-
-    [YamlDotNet.Serialization.YamlSerializable]
     public sealed partial class HttpRouteBackendRefV1
     {
         [YamlDotNet.Serialization.YamlMember(Alias = "name")]
@@ -1397,16 +1378,6 @@ namespace Aspire.Hosting.Kubernetes.Resources
 
         [YamlDotNet.Serialization.YamlMember(Alias = "port")]
         public int Port { get { throw null; } set { } }
-    }
-
-    [YamlDotNet.Serialization.YamlSerializable]
-    public sealed partial class HttpRouteFilterV1
-    {
-        [YamlDotNet.Serialization.YamlMember(Alias = "type")]
-        public string Type { get { throw null; } set { } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "urlRewrite")]
-        public HttpUrlRewriteFilterV1? UrlRewrite { get { throw null; } set { } }
     }
 
     [YamlDotNet.Serialization.YamlSerializable]
@@ -1435,20 +1406,8 @@ namespace Aspire.Hosting.Kubernetes.Resources
     [YamlDotNet.Serialization.YamlSerializable]
     public sealed partial class HttpRouteParentRefV1
     {
-        [YamlDotNet.Serialization.YamlMember(Alias = "group")]
-        public string? Group { get { throw null; } set { } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "kind")]
-        public string? Kind { get { throw null; } set { } }
-
         [YamlDotNet.Serialization.YamlMember(Alias = "name")]
         public string Name { get { throw null; } set { } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "namespace")]
-        public string? Namespace { get { throw null; } set { } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "sectionName")]
-        public string? SectionName { get { throw null; } set { } }
     }
 
     [YamlDotNet.Serialization.YamlSerializable]
@@ -1466,9 +1425,6 @@ namespace Aspire.Hosting.Kubernetes.Resources
     {
         [YamlDotNet.Serialization.YamlMember(Alias = "backendRefs")]
         public System.Collections.Generic.List<HttpRouteBackendRefV1> BackendRefs { get { throw null; } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "filters")]
-        public System.Collections.Generic.List<HttpRouteFilterV1> Filters { get { throw null; } }
 
         [YamlDotNet.Serialization.YamlMember(Alias = "matches")]
         public System.Collections.Generic.List<HttpRouteMatchV1> Matches { get { throw null; } }
@@ -1494,16 +1450,6 @@ namespace Aspire.Hosting.Kubernetes.Resources
 
         [YamlDotNet.Serialization.YamlMember(Alias = "spec")]
         public HttpRouteSpecV1 Spec { get { throw null; } set { } }
-    }
-
-    [YamlDotNet.Serialization.YamlSerializable]
-    public sealed partial class HttpUrlRewriteFilterV1
-    {
-        [YamlDotNet.Serialization.YamlMember(Alias = "hostname")]
-        public string? Hostname { get { throw null; } set { } }
-
-        [YamlDotNet.Serialization.YamlMember(Alias = "path")]
-        public HttpPathModifierV1? Path { get { throw null; } set { } }
     }
 
     [YamlDotNet.Serialization.YamlSerializable]

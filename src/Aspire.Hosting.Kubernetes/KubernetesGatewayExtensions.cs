@@ -86,11 +86,11 @@ public static class KubernetesGatewayExtensions
         string? sectionName = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
 
-        // Empty strings are rejected rather than ignored: the YAML emitter drops empty scalars, so an
-        // empty namespace or sectionName would silently produce a bare parentRef that attaches to the
-        // wrong Gateway instead of failing loudly here.
+        // Unlike `group`, where the Gateway API gives the empty string the distinct meaning "core API
+        // group", an empty or whitespace name/namespace/sectionName has no meaning and would emit a
+        // parentRef that resolves to nothing. Reject it here rather than emitting an unusable route.
         if (@namespace is not null)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(@namespace);
@@ -168,18 +168,22 @@ public static class KubernetesGatewayExtensions
             return;
         }
 
-        // An empty or whitespace value cannot simply be ignored: the YAML emitter drops empty scalars,
-        // which would render "type: ReplacePrefixMatch" with no "replacePrefixMatch" sibling and be
-        // rejected by the HTTPRoute CRD.
-        ArgumentException.ThrowIfNullOrWhiteSpace(rewritePrefix, paramName);
-
-        if (!rewritePrefix.StartsWith('/'))
+        // An empty rewritePrefix is deliberately allowed: the Gateway API defines it as stripping the
+        // matched prefix, so "/foo/bar" under a "/foo" prefix match rewrites to "/bar". The only
+        // constraint the spec places on the value itself is a 1024-character maximum, so no leading-'/'
+        // requirement is imposed here. A whitespace-only value has no such defined meaning and is always
+        // a mistake, so it is still rejected.
+        if (rewritePrefix.Length > 0 && string.IsNullOrWhiteSpace(rewritePrefix))
         {
-            throw new ArgumentException("Rewrite prefix must start with '/'.", paramName);
+            throw new ArgumentException(
+                "Rewrite prefix must not be whitespace. Use an empty string to strip the matched prefix.",
+                paramName);
         }
 
         // ReplacePrefixMatch substitutes the portion of the path that the match consumed, so there has to
-        // be a matched prefix to replace. With an Exact or RegularExpression match there is none.
+        // be a matched prefix to replace. With an Exact or RegularExpression match there is none. The
+        // Gateway API enforces the same constraint with a CEL rule on HTTPRouteRule: "When using
+        // URLRewrite filter with path.replacePrefixMatch, exactly one PathPrefix match must be specified".
         if (pathType != GatewayPathMatchType.PathPrefix)
         {
             throw new ArgumentException(

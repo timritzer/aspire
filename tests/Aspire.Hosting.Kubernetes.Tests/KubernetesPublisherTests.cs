@@ -995,9 +995,10 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
     [Fact]
     public async Task KubernetesRouteWithRewritePrefixEmitsUrlRewriteFilter()
     {
-        // A route with a rewritePrefix produces a URLRewrite filter on the HTTPRoute rule. Per the
-        // Gateway API the filter block must serialize AFTER `matches` and BEFORE `backendRefs`, which
-        // is the ordering Istio and most controllers require.
+        // A route with a rewritePrefix produces a URLRewrite filter on the HTTPRoute rule. The rule's
+        // keys are emitted in a pinned order (matches, filters, backendRefs) so generated manifests stay
+        // deterministic and match the Gateway API reference documentation; mapping key order itself
+        // carries no semantic meaning to a controller.
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
         var k8s = builder.AddKubernetesEnvironment("k8s");
@@ -1015,6 +1016,38 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
 
         var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
         await Verify(File.ReadAllText(routePath), "yaml");
+    }
+
+    [Fact]
+    public async Task KubernetesRouteWithEmptyRewritePrefixStripsMatchedPrefix()
+    {
+        // An empty replacePrefixMatch is meaningful data, not a missing value: the Gateway API defines
+        // it as stripping the matched prefix, so "/api/orders" under a "/api" prefix match is rewritten
+        // to "/orders". The YAML emitter skips empty collections, and because string implements
+        // IEnumerable an empty string was previously dropped along with them — which would have emitted
+        // "type: ReplacePrefixMatch" with no replacePrefixMatch sibling, a shape the HTTPRoute CRD
+        // rejects. This asserts the empty scalar survives serialization.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway").WithGatewayClass("nginx");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: "");
+
+        var app = builder.Build();
+        app.Run();
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        var routeContent = File.ReadAllText(routePath);
+
+        Assert.Contains("replacePrefixMatch: \"\"", routeContent);
+
+        await Verify(routeContent, "yaml");
     }
 
     [Fact]
@@ -1086,9 +1119,10 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
         Assert.True(File.Exists(routePath), $"Expected HTTPRoute manifest at {routePath}");
         var routeContent = await File.ReadAllTextAsync(routePath);
 
-        // Must be a Helm reference, not a raw ReferenceExpression placeholder or an inlined literal.
-        Assert.DoesNotContain("\"{0}\"", routeContent);
-        Assert.Contains($"{{{{ .Values.parameters.gateway.{hostnameParamName} }}}}", routeContent);
+        // Assert the fully rendered scalar, including quoting and list-item form. That is strictly
+        // stronger than checking the reference appears somewhere: it proves the raw
+        // ReferenceExpression placeholder ("{0}") was substituted and the value was not inlined.
+        Assert.Contains($"- \"{{{{ .Values.parameters.gateway.{hostnameParamName} }}}}\"", routeContent);
 
         var valuesPath = Path.Combine(workspace.Path, "values.yaml");
         Assert.True(File.Exists(valuesPath), $"Expected values.yaml at {valuesPath}");
@@ -1139,11 +1173,12 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
         Assert.True(File.Exists(routePath), $"Expected HTTPRoute manifest at {routePath}");
         var routeContent = await File.ReadAllTextAsync(routePath);
 
-        // Must be Helm references, not raw ReferenceExpression placeholders or inlined literals.
-        Assert.DoesNotContain("\"{0}\"", routeContent);
-        Assert.Contains($"{{{{ .Values.parameters.gateway.{namePart} }}}}", routeContent);
-        Assert.Contains($"{{{{ .Values.parameters.gateway.{namespacePart} }}}}", routeContent);
-        // A literal sectionName alongside parameter-backed parts must still render verbatim.
+        // Assert each fully rendered key/value pair, including quoting. That is strictly stronger than
+        // checking the references appear somewhere: it proves the raw ReferenceExpression placeholder
+        // ("{0}") was substituted, and that a literal sectionName alongside parameter-backed parts
+        // still renders verbatim.
+        Assert.Contains($"- name: \"{{{{ .Values.parameters.gateway.{namePart} }}}}\"", routeContent);
+        Assert.Contains($"namespace: \"{{{{ .Values.parameters.gateway.{namespacePart} }}}}\"", routeContent);
         Assert.Contains("sectionName: \"https\"", routeContent);
 
         var valuesPath = Path.Combine(workspace.Path, "values.yaml");

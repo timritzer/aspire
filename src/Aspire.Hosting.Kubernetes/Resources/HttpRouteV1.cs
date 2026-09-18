@@ -234,10 +234,11 @@ public sealed class HttpRouteBackendRefV1
 public sealed class HttpRouteFilterV1
 {
     /// <summary>
-    /// Gets or sets the filter type. The Gateway API defines <c>RequestHeaderModifier</c> and
-    /// <c>RequestRedirect</c> at Core support level, <c>ResponseHeaderModifier</c>, <c>RequestMirror</c>,
-    /// and <c>URLRewrite</c> at Extended support level, and <c>ExtensionRef</c> as
-    /// implementation-specific. Confirm your controller supports the chosen type.
+    /// Gets or sets the filter type. Only <c>URLRewrite</c> has a companion property on this type
+    /// (<see cref="UrlRewrite"/>); the Gateway API also defines <c>RequestHeaderModifier</c>,
+    /// <c>RequestRedirect</c>, <c>ResponseHeaderModifier</c>, <c>RequestMirror</c>, and
+    /// <c>ExtensionRef</c>, which this type does not yet model. Confirm your controller supports the
+    /// chosen type.
     /// </summary>
     [YamlMember(Alias = "type")]
     public string Type { get; set; } = null!;
