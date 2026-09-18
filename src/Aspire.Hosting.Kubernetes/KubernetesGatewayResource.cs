@@ -14,7 +14,7 @@ namespace Aspire.Hosting.Kubernetes;
 /// <remarks>
 /// <para>
 /// Create a gateway using <see cref="KubernetesGatewayExtensions.AddGateway"/> and configure
-/// routes using <see cref="KubernetesGatewayExtensions.WithRoute(IResourceBuilder{KubernetesGatewayResource}, string, EndpointReference, GatewayPathMatchType, string)"/>.
+/// routes using <see cref="KubernetesGatewayExtensions.WithRoute(IResourceBuilder{KubernetesGatewayResource}, string, EndpointReference, GatewayPathMatchType)"/>.
 /// </para>
 /// <para>
 /// At publish time, the gateway generates a <c>gateway.networking.k8s.io/v1 Gateway</c> resource
