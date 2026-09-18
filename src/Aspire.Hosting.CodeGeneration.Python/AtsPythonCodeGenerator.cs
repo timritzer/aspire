@@ -238,15 +238,13 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
 
     private static string ApplyNullableType(AtsTypeRef typeRef, string mappedType)
     {
-        if (typeRef.IsNullable != true || typeRef.Category is not (AtsTypeCategory.Primitive or AtsTypeCategory.Enum))
-        {
-            return mappedType;
-        }
-
-        return typeRef.TypeId is AtsConstants.Void or AtsConstants.Any or AtsConstants.CancellationToken
-            ? mappedType
-            : $"{mappedType} | None";
+        return ShouldApplyNullableType(typeRef) ? $"{mappedType} | None" : mappedType;
     }
+
+    private static bool ShouldApplyNullableType(AtsTypeRef typeRef) =>
+        typeRef.IsNullable == true
+        && typeRef.Category is AtsTypeCategory.Primitive or AtsTypeCategory.Enum
+        && typeRef.TypeId is not (AtsConstants.Void or AtsConstants.Any or AtsConstants.CancellationToken);
 
     /// <summary>
     /// Maps primitive type IDs to Python types.
@@ -272,7 +270,7 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
     {
         if (param.IsCallback)
         {
-            return $"self._client.register_callback({paramName})";
+            return $"self._client.register_callback({paramName}{GetCallbackParameterTypeIds(param)})";
         }
         if (param.Type?.TypeId == AtsConstants.CancellationToken)
         {
@@ -285,13 +283,30 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
     {
         if (param.IsCallback)
         {
-            return $"client.register_callback({paramName})";
+            return $"client.register_callback({paramName}{GetCallbackParameterTypeIds(param)})";
         }
         if (param.Type?.TypeId == AtsConstants.CancellationToken)
         {
             return $"client.register_cancellation_token({paramName})";
         }
         return paramName;
+    }
+
+    private static string GetCallbackParameterTypeIds(AtsParameterInfo parameter)
+    {
+        if (parameter.CallbackParameters is not { Count: > 0 } callbackParameters ||
+            !callbackParameters.Any(callbackParameter => IsHandleType(callbackParameter.Type)))
+        {
+            return string.Empty;
+        }
+
+        var typeIds = callbackParameters.Select(callbackParameter =>
+            IsHandleType(callbackParameter.Type)
+                ? JsonValue.Create(callbackParameter.Type.TypeId)!.ToJsonString()
+                : "None");
+        var tupleSuffix = callbackParameters.Count == 1 ? "," : string.Empty;
+
+        return $", ({string.Join(", ", typeIds)}{tupleSuffix})";
     }
 
     /// <summary>
@@ -482,6 +497,42 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
         };
     }
 
+    private static bool RequiresOmissionSentinel(AtsParameterInfo param) =>
+        GetPythonDefaultValue(param) != "None" &&
+        (param.IsNullable || AllowsNoneAtTopLevel(param.Type));
+
+    private static string GetOptionalParameterPresenceCheck(AtsParameterInfo param, string parameterName) =>
+        RequiresOmissionSentinel(param)
+            ? $"{parameterName} is not _ASPIRE_UNSET"
+            : $"{parameterName} is not None";
+
+    private static string MakeNullable(AtsParameterInfo param, string type)
+    {
+        return AllowsNoneAtTopLevel(param.Type) ? type : $"{type} | None";
+    }
+
+    private static bool AllowsNoneAtTopLevel(AtsTypeRef? typeRef)
+    {
+        if (typeRef is null)
+        {
+            return false;
+        }
+
+        if (typeRef.Category == AtsTypeCategory.Union)
+        {
+            // Union members remain at the rendered top level, including members of nested unions.
+            // Collection element, key, and value types do not, so intentionally do not traverse them.
+            return typeRef.UnionTypes?.Any(AllowsNoneAtTopLevel) == true;
+        }
+
+        if (typeRef.Category == AtsTypeCategory.Primitive && typeRef.TypeId == AtsConstants.Void)
+        {
+            return true;
+        }
+
+        return ShouldApplyNullableType(typeRef);
+    }
+
     /// <summary>
     /// Gets the Python type annotation suffix and default value for an optional parameter.
     /// Uses the actual default value when available instead of always defaulting to None.
@@ -489,19 +540,20 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
     private string GetOptionalParamSuffix(AtsParameterInfo param)
     {
         var pythonDefault = GetPythonDefaultValue(param);
+        var mappedType = MapParameterToPython(param);
         if (pythonDefault == "None")
         {
-            var paramType = MapParameterToPython(param);
-            return $"{paramType} | None = None";
+            return $"{MakeNullable(param, mappedType)} = None";
         }
 
-        var type = MapParameterToPython(param);
         // When we have a real default, the type doesn't need "| None" unless the param is also nullable
-        if (param.IsNullable)
+        var annotatedType = param.IsNullable ? MakeNullable(param, mappedType) : mappedType;
+        if (RequiresOmissionSentinel(param))
         {
-            return $"{type} | None = {pythonDefault}";
+            return $"{annotatedType} = typing.cast({annotatedType}, _ASPIRE_UNSET)";
         }
-        return $"{type} = {pythonDefault}";
+
+        return $"{annotatedType} = {pythonDefault}";
     }
 
     /// <summary>
@@ -774,12 +826,10 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
         }
 
         // Collect enum type names
+        _enumTypeNames.Clear();
         foreach (var enumType in enumTypes)
         {
-            if (!_enumTypeNames.ContainsKey(enumType.TypeId))
-            {
-                _enumTypeNames[enumType.TypeId] = ExtractSimpleTypeName(enumType.TypeId);
-            }
+            _enumTypeNames[enumType.TypeId] = enumType.Name;
         }
 
         // Separate builders into categories:
@@ -1353,7 +1403,8 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
 
             if (param.IsOptional || param.IsNullable)
             {
-                sb.AppendLine(CultureInfo.InvariantCulture, $"        if {paramName} is not None:");
+                var presenceCheck = GetOptionalParameterPresenceCheck(param, paramName);
+                sb.AppendLine(CultureInfo.InvariantCulture, $"        if {presenceCheck}:");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"            rpc_args['{param.Name}'] = {paramHandler}");
             }
             else
@@ -1692,7 +1743,8 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
 
             if (param.IsOptional || param.IsNullable)
             {
-                sb.AppendLine(CultureInfo.InvariantCulture, $"        if {paramName} is not None:");
+                var presenceCheck = GetOptionalParameterPresenceCheck(param, paramName);
+                sb.AppendLine(CultureInfo.InvariantCulture, $"        if {presenceCheck}:");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"            rpc_args['{param.Name}'] = {paramHandler}");
             }
             else
@@ -1703,12 +1755,13 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
 
         // Check if this is a merged capability that needs conditional dispatch
         _mergedCapabilityDispatches.TryGetValue(capability.CapabilityId, out var mergedDispatch);
-        var discriminatingPythonParam = mergedDispatch is not null ? GetParamName(
-            userParams.First(p => string.Equals(p.Name, mergedDispatch.DiscriminatingParamName, StringComparison.Ordinal))) : null;
 
         if (mergedDispatch is not null)
         {
-            sb.AppendLine(CultureInfo.InvariantCulture, $"        capability_id = '{mergedDispatch.AlternateCapabilityId}' if {discriminatingPythonParam} is not None else '{capability.CapabilityId}'");
+            var discriminatingParam = userParams.First(p => string.Equals(p.Name, mergedDispatch.DiscriminatingParamName, StringComparison.Ordinal));
+            var discriminatingPythonParam = GetParamName(discriminatingParam);
+            var presenceCheck = GetOptionalParameterPresenceCheck(discriminatingParam, discriminatingPythonParam);
+            sb.AppendLine(CultureInfo.InvariantCulture, $"        capability_id = '{mergedDispatch.AlternateCapabilityId}' if {presenceCheck} else '{capability.CapabilityId}'");
         }
 
         var capabilityIdExpr = mergedDispatch is not null ? "capability_id" : $"'{capability.CapabilityId}'";
@@ -1808,7 +1861,8 @@ internal sealed class AtsPythonCodeGenerator : ICodeGenerator
             var paramName = GetParamName(param);
             if (param.IsOptional || param.IsNullable)
             {
-                sb.AppendLine(CultureInfo.InvariantCulture, $"    if {paramName} is not None:");
+                var presenceCheck = GetOptionalParameterPresenceCheck(param, paramName);
+                sb.AppendLine(CultureInfo.InvariantCulture, $"    if {presenceCheck}:");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"        rpc_args['{param.Name}'] = {paramName}");
             }
             else

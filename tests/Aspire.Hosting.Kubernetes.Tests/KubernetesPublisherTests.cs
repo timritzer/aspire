@@ -3,6 +3,7 @@
 
 #pragma warning disable ASPIRECOMPUTE002 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 #pragma warning disable ASPIREPIPELINES001
+#pragma warning disable ASPIREDOTNETPROJECT001
 
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Kubernetes.Resources;
@@ -323,7 +324,7 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
         builder
             .AddProject<TestProject>("project1", launchProfileName: null)
             .WithHttpsEndpoint()
-            .WithHttpProbe(ProbeType.Readiness,"/ready", initialDelaySeconds: 60)
+            .WithHttpProbe(ProbeType.Readiness, "/ready", initialDelaySeconds: 60)
             .WithHttpProbe(ProbeType.Liveness, "/health");
 #pragma warning restore ASPIREPROBES001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 
@@ -443,6 +444,90 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
                     Name = "projected-secrets",
                     MountPath = "/mnt/secrets",
                     ReadOnly = true
+                });
+            });
+
+        var app = builder.Build();
+
+        app.Run();
+
+        var deploymentPath = Path.Combine(workspace.Path, "templates/myapp/deployment.yaml");
+        var deployment = await File.ReadAllTextAsync(deploymentPath);
+
+        await Verify(deployment, "yaml");
+    }
+
+    [Fact]
+    public async Task PublishAsync_SupportsCsiVolumes()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+
+        builder.AddKubernetesEnvironment("env");
+
+        builder.AddContainer("myapp", "mcr.microsoft.com/dotnet/aspnet:8.0")
+            .PublishAsKubernetesService(serviceResource =>
+            {
+                var podTemplate = serviceResource.Workload!.PodTemplate;
+                podTemplate.Spec.Volumes.Add(new()
+                {
+                    Name = "secrets-store",
+                    Csi = new()
+                    {
+                        Driver = "secrets-store.csi.k8s.io",
+                        ReadOnly = true,
+                        FsType = "ext4",
+                        VolumeAttributes =
+                        {
+                            ["secretProviderClass"] = "my-spc"
+                        },
+                        NodePublishSecretRef = new()
+                        {
+                            Name = "secrets-store-creds"
+                        }
+                    }
+                });
+
+                podTemplate.Spec.Containers[0].VolumeMounts.Add(new()
+                {
+                    Name = "secrets-store",
+                    MountPath = "/mnt/secrets-store",
+                    ReadOnly = true
+                });
+            });
+
+        var app = builder.Build();
+
+        app.Run();
+
+        var deploymentPath = Path.Combine(workspace.Path, "templates/myapp/deployment.yaml");
+        var deployment = await File.ReadAllTextAsync(deploymentPath);
+
+        await Verify(deployment, "yaml");
+    }
+
+    [Fact]
+    public async Task PublishAsync_OmitsCsiVolumeSourceWhenUnset()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+
+        builder.AddKubernetesEnvironment("env");
+
+        builder.AddContainer("myapp", "mcr.microsoft.com/dotnet/aspnet:8.0")
+            .PublishAsKubernetesService(serviceResource =>
+            {
+                var podTemplate = serviceResource.Workload!.PodTemplate;
+                podTemplate.Spec.Volumes.Add(new()
+                {
+                    Name = "scratch",
+                    EmptyDir = new()
+                });
+
+                podTemplate.Spec.Containers[0].VolumeMounts.Add(new()
+                {
+                    Name = "scratch",
+                    MountPath = "/mnt/scratch"
                 });
             });
 
@@ -653,6 +738,25 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
         }
 
         await settingsTask;
+    }
+
+    [Fact]
+    public async Task KubernetesWithDotnetProjectUsesImageParameterAndProjectEndpoint()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        builder.AddKubernetesEnvironment("env");
+        builder.AddDotnetProject("api", "api.csproj", options => options.ExcludeLaunchProfile = true)
+            .WithHttpEndpoint();
+        using var app = builder.Build();
+
+        app.Run();
+
+        await Verify(File.ReadAllText(Path.Combine(workspace.Path, "Chart.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "values.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "templates", "api", "deployment.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "templates", "api", "service.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "templates", "api", "config.yaml")), "yaml");
     }
 
     [Fact]
