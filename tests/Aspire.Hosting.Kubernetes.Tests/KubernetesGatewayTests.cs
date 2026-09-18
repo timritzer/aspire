@@ -431,14 +431,13 @@ public class KubernetesGatewayTests(ITestOutputHelper outputHelper)
     }
 
     [Theory]
-    [InlineData("")]
     [InlineData("   ")]
-    [InlineData("api")]
-    public void WithRoute_InvalidRewritePrefix_Throws(string rewritePrefix)
+    [InlineData("\t")]
+    public void WithRoute_WhitespaceRewritePrefix_Throws(string rewritePrefix)
     {
-        // An empty rewrite prefix is the dangerous case: the YAML emitter drops empty scalars, so it
-        // would silently produce "type: ReplacePrefixMatch" with no sibling value. Reject at the API
-        // boundary instead of emitting a manifest the CRD rejects.
+        // The Gateway API constrains replacePrefixMatch only by length, so shape validation here is
+        // deliberately minimal. A whitespace-only value is the one case with no defined meaning: it is
+        // always a typo, and unlike an empty string it cannot be read as "strip the matched prefix".
         var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
         var k8s = builder.AddKubernetesEnvironment("env");
         var api = builder.AddContainer("myapi", "nginx")
@@ -452,6 +451,31 @@ public class KubernetesGatewayTests(ITestOutputHelper outputHelper)
 
         Assert.Throws<ArgumentException>(
             () => gateway.WithRoute("app.example.com", "/api", api.GetEndpoint("http"), rewritePrefix: rewritePrefix));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("api")]
+    public void WithRoute_RewritePrefixWithoutLeadingSlash_IsAccepted(string rewritePrefix)
+    {
+        // Two values Aspire previously rejected but the Gateway API permits. An empty string is
+        // explicitly defined as stripping the matched prefix ("/foo/bar" under "/foo" becomes "/bar"),
+        // and the spec imposes no leading-'/' requirement — only a 1024-character maximum.
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        var k8s = builder.AddKubernetesEnvironment("env");
+        var api = builder.AddContainer("myapi", "nginx")
+            .WithHttpEndpoint(targetPort: 8080)
+            .WithExternalHttpEndpoints();
+
+        var gateway = k8s.AddGateway("gw").WithGatewayClass("nginx");
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: rewritePrefix);
+        gateway.WithRoute("app.example.com", "/api", api.GetEndpoint("http"), rewritePrefix: rewritePrefix);
+
+        Assert.Collection(
+            gateway.Resource.Routes,
+            route => Assert.Equal(rewritePrefix, route.RewritePrefix),
+            route => Assert.Equal(rewritePrefix, route.RewritePrefix));
     }
 
     [Theory]
@@ -484,7 +508,11 @@ public class KubernetesGatewayTests(ITestOutputHelper outputHelper)
         var gateway = k8s.AddGateway("gw");
 
         Assert.Throws<ArgumentException>(() => gateway.AsExisting(string.Empty));
+        // Whitespace is rejected for the same reason as empty: it names no Gateway. The C# overload and
+        // the polyglot union dispatcher must agree, and the dispatcher already rejects whitespace.
+        Assert.Throws<ArgumentException>(() => gateway.AsExisting("   "));
         Assert.Throws<ArgumentException>(() => gateway.AsExisting("shared", @namespace: "   "));
+        Assert.Throws<ArgumentException>(() => gateway.AsExisting("shared", sectionName: "   "));
     }
 
     [Fact]
