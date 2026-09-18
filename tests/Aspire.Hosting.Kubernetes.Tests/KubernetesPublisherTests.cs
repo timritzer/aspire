@@ -3,6 +3,7 @@
 
 #pragma warning disable ASPIRECOMPUTE002 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 #pragma warning disable ASPIREPIPELINES001
+#pragma warning disable ASPIREDOTNETPROJECT001
 
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Kubernetes.Resources;
@@ -323,7 +324,7 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
         builder
             .AddProject<TestProject>("project1", launchProfileName: null)
             .WithHttpsEndpoint()
-            .WithHttpProbe(ProbeType.Readiness,"/ready", initialDelaySeconds: 60)
+            .WithHttpProbe(ProbeType.Readiness, "/ready", initialDelaySeconds: 60)
             .WithHttpProbe(ProbeType.Liveness, "/health");
 #pragma warning restore ASPIREPROBES001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 
@@ -740,6 +741,25 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task KubernetesWithDotnetProjectUsesImageParameterAndProjectEndpoint()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        builder.AddKubernetesEnvironment("env");
+        builder.AddDotnetProject("api", "api.csproj", options => options.ExcludeLaunchProfile = true)
+            .WithHttpEndpoint();
+        using var app = builder.Build();
+
+        app.Run();
+
+        await Verify(File.ReadAllText(Path.Combine(workspace.Path, "Chart.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "values.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "templates", "api", "deployment.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "templates", "api", "service.yaml")), "yaml")
+            .AppendContentAsFile(File.ReadAllText(Path.Combine(workspace.Path, "templates", "api", "config.yaml")), "yaml");
+    }
+
+    [Fact]
     public async Task KubernetesMapsPortsForBaitAndSwitchResources()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
@@ -939,6 +959,240 @@ public class KubernetesPublisherTests(ITestOutputHelper outputHelper)
             }
         }
         await settingsTask;
+    }
+
+    [Fact]
+    public async Task KubernetesRouteAttachesToExistingCrossNamespaceGateway()
+    {
+        // AsExisting attaches HTTPRoutes to a Gateway that is provisioned outside the app model
+        // (for example a platform-owned shared gateway in another namespace). In that mode Aspire
+        // emits no Gateway object of its own; only the HTTPRoute is generated, and its parentRef
+        // carries the namespace + sectionName so the route binds to the correct listener.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting("shared-gateway", @namespace: "infra", sectionName: "https");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        // No Gateway object is generated when attaching to a pre-existing gateway.
+        var gatewayObjectPath = Path.Combine(workspace.Path, "templates/gateway/gateway.yaml");
+        Assert.False(File.Exists(gatewayObjectPath), "No Gateway object should be emitted when attaching to an existing gateway.");
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        await Verify(File.ReadAllText(routePath), "yaml");
+    }
+
+    [Fact]
+    public async Task KubernetesRouteWithRewritePrefixEmitsUrlRewriteFilter()
+    {
+        // A route with a rewritePrefix produces a URLRewrite filter on the HTTPRoute rule. The rule's
+        // keys are emitted in a pinned order (matches, filters, backendRefs) so generated manifests stay
+        // deterministic and match the Gateway API reference documentation; mapping key order itself
+        // carries no semantic meaning to a controller.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway").WithGatewayClass("nginx");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: "/");
+
+        var app = builder.Build();
+        app.Run();
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        await Verify(File.ReadAllText(routePath), "yaml");
+    }
+
+    [Fact]
+    public async Task KubernetesRouteWithEmptyRewritePrefixStripsMatchedPrefix()
+    {
+        // An empty replacePrefixMatch is meaningful data, not a missing value: the Gateway API defines
+        // it as stripping the matched prefix, so "/api/orders" under a "/api" prefix match is rewritten
+        // to "/orders". The YAML emitter skips empty collections, and because string implements
+        // IEnumerable an empty string was previously dropped along with them — which would have emitted
+        // "type: ReplacePrefixMatch" with no replacePrefixMatch sibling, a shape the HTTPRoute CRD
+        // rejects. This asserts the empty scalar survives serialization.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway").WithGatewayClass("nginx");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: "");
+
+        var app = builder.Build();
+        app.Run();
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        var routeContent = File.ReadAllText(routePath);
+
+        Assert.Contains("replacePrefixMatch: \"\"", routeContent);
+
+        await Verify(routeContent, "yaml");
+    }
+
+    [Fact]
+    public async Task KubernetesRouteOnExistingGatewayInheritsConfiguredHostnames()
+    {
+        // Hostnames configured on the gateway resource feed two distinct consumers: the listeners of a
+        // Gateway we generate, and HTTPRoute.spec.hostnames on every route. Only the former is skipped
+        // in existing mode. A hostless route must still inherit the configured hostnames, otherwise the
+        // Gateway API treats it as matching every listener that admits it, over-attaching the route
+        // across all listeners of a shared platform gateway.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting("shared-gateway", @namespace: "infra")
+            .WithHostname("app.example.com");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        var gatewayObjectPath = Path.Combine(workspace.Path, "templates/gateway/gateway.yaml");
+        Assert.False(File.Exists(gatewayObjectPath), "No Gateway object should be emitted when attaching to an existing gateway.");
+
+        var routePath = Path.Combine(workspace.Path, "templates/gateway/route.yaml");
+        await Verify(File.ReadAllText(routePath), "yaml");
+    }
+
+    [Fact]
+    public async Task KubernetesRouteOnExistingGatewayCapturesParameterHostnameAsHelmValue()
+    {
+        // The literal-hostname test above never exercises the Helm value-capture path. A
+        // parameter-backed hostname must render into the HTTPRoute as
+        // `{{ .Values.parameters.<gateway>.<param> }}` and be registered in values.yaml, otherwise
+        // the published chart references a value that was never declared and `helm template`
+        // substitutes <no value>. Existing mode is the case that matters: hostname resolution used
+        // to be skipped entirely there, so the capture never ran.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+
+        // Unique parameter name per run to defeat any persistent state file lookup. No default value:
+        // ShouldCaptureAsHelmValue only captures parameters whose Default is null (or that are secret),
+        // so a defaulted parameter would be inlined as a literal and never reach the capture path.
+        var hostnameParamName = $"gatewayhost{Guid.NewGuid():N}";
+        var hostnameParam = builder.AddParameter(hostnameParamName);
+
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting("shared-gateway", @namespace: "infra")
+            .WithHostname(hostnameParam);
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        var routePath = Path.Combine(workspace.Path, "templates", "gateway", "route.yaml");
+        Assert.True(File.Exists(routePath), $"Expected HTTPRoute manifest at {routePath}");
+        var routeContent = await File.ReadAllTextAsync(routePath);
+
+        // Assert the fully rendered scalar, including quoting and list-item form. That is strictly
+        // stronger than checking the reference appears somewhere: it proves the raw
+        // ReferenceExpression placeholder ("{0}") was substituted and the value was not inlined.
+        Assert.Contains($"- \"{{{{ .Values.parameters.gateway.{hostnameParamName} }}}}\"", routeContent);
+
+        var valuesPath = Path.Combine(workspace.Path, "values.yaml");
+        Assert.True(File.Exists(valuesPath), $"Expected values.yaml at {valuesPath}");
+        var valuesContent = await File.ReadAllTextAsync(valuesPath);
+
+        Assert.Matches(
+            new System.Text.RegularExpressions.Regex(@"parameters:[\s\S]+gateway:[\s\S]+" +
+                System.Text.RegularExpressions.Regex.Escape(hostnameParamName) + @"\s*:"),
+            valuesContent);
+    }
+
+    [Fact]
+    public async Task KubernetesExistingGatewayCapturesParameterIdentityAsHelmValues()
+    {
+        // The gateway a route attaches to is usually environment-specific, so its name/namespace/
+        // sectionName must be parameterizable. All three run through the same expression pipeline as
+        // every other user-supplied value, so a parameter-backed identity has to render as a Helm
+        // reference in the parentRef and be declared in values.yaml — otherwise `helm template`
+        // substitutes <no value> and the route silently attaches to nothing.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+
+        // No default value: ShouldCaptureAsHelmValue only captures parameters whose Default is null,
+        // so a defaulted parameter would be inlined as a literal and never reach the capture path.
+        var namePart = $"gwname{Guid.NewGuid():N}";
+        var namespacePart = $"gwns{Guid.NewGuid():N}";
+        var gatewayNameParam = builder.AddParameter(namePart);
+        var gatewayNamespaceParam = builder.AddParameter(namespacePart);
+
+        var k8s = builder.AddKubernetesEnvironment("k8s");
+
+        var gateway = k8s.AddGateway("gateway")
+            .AsExisting(gatewayNameParam, gatewayNamespaceParam, sectionName: "https");
+
+        var api = builder.AddContainer("api", "questdb/questdb:9.4.1")
+            .WithHttpEndpoint(port: 9002, targetPort: 9000, name: "http")
+            .WithExternalHttpEndpoints();
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"));
+
+        var app = builder.Build();
+        app.Run();
+
+        var gatewayObjectPath = Path.Combine(workspace.Path, "templates", "gateway", "gateway.yaml");
+        Assert.False(File.Exists(gatewayObjectPath), "No Gateway object should be emitted when attaching to an existing gateway.");
+
+        var routePath = Path.Combine(workspace.Path, "templates", "gateway", "route.yaml");
+        Assert.True(File.Exists(routePath), $"Expected HTTPRoute manifest at {routePath}");
+        var routeContent = await File.ReadAllTextAsync(routePath);
+
+        // Assert each fully rendered key/value pair, including quoting. That is strictly stronger than
+        // checking the references appear somewhere: it proves the raw ReferenceExpression placeholder
+        // ("{0}") was substituted, and that a literal sectionName alongside parameter-backed parts
+        // still renders verbatim.
+        Assert.Contains($"- name: \"{{{{ .Values.parameters.gateway.{namePart} }}}}\"", routeContent);
+        Assert.Contains($"namespace: \"{{{{ .Values.parameters.gateway.{namespacePart} }}}}\"", routeContent);
+        Assert.Contains("sectionName: \"https\"", routeContent);
+
+        var valuesPath = Path.Combine(workspace.Path, "values.yaml");
+        Assert.True(File.Exists(valuesPath), $"Expected values.yaml at {valuesPath}");
+        var valuesContent = await File.ReadAllTextAsync(valuesPath);
+
+        Assert.Matches(
+            new System.Text.RegularExpressions.Regex(@"parameters:[\s\S]+gateway:[\s\S]+" +
+                System.Text.RegularExpressions.Regex.Escape(namePart) + @"\s*:"),
+            valuesContent);
+        Assert.Matches(
+            new System.Text.RegularExpressions.Regex(@"parameters:[\s\S]+gateway:[\s\S]+" +
+                System.Text.RegularExpressions.Regex.Escape(namespacePart) + @"\s*:"),
+            valuesContent);
     }
 
     [Fact]

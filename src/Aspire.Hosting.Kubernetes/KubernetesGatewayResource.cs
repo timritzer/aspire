@@ -98,7 +98,8 @@ internal sealed record GatewayRouteConfig(
     string? Host,
     string Path,
     GatewayPathMatchType PathType,
-    EndpointReference Endpoint);
+    EndpointReference Endpoint,
+    string? RewritePrefix = null);
 
 /// <summary>
 /// Specifies the type of path matching used in a Kubernetes Gateway API <c>HTTPRoute</c> rule.

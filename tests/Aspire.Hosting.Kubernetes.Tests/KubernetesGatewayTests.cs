@@ -392,6 +392,130 @@ public class KubernetesGatewayTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task AsExisting_WithGatewayOwnedConfiguration_WarnsThatItIsIgnored()
+    {
+        // AsExisting drops every setting that configures the Gateway object itself, because the
+        // platform owns it. Dropping silently is the failure mode users cannot debug, so the warning
+        // must name each ignored concern.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
+
+        var testSink = new TestSink();
+        builder.Services.AddLogging(logging => logging.AddProvider(new TestLoggerProvider(testSink)));
+
+        var k8s = builder.AddKubernetesEnvironment("env");
+
+        var api = builder.AddContainer("myapi", "nginx")
+            .WithHttpEndpoint(targetPort: 8080)
+            .WithExternalHttpEndpoints();
+
+        k8s.AddGateway("shared")
+            .AsExisting("platform-gateway", @namespace: "infra")
+            .WithGatewayClass("nginx")
+            .WithTls("my-tls-secret")
+            .WithGatewayAnnotation("example.com/tier", "gold")
+            .WithRoute("/api", api.GetEndpoint("http"));
+
+        using var app = builder.Build();
+        app.Run();
+
+        var warning = Assert.Single(
+            testSink.Writes,
+            w => w.LogLevel == LogLevel.Warning && w.Message is not null && w.Message.Contains("AsExisting()", StringComparison.Ordinal));
+
+        Assert.Equal(
+            "Gateway 'shared' is marked AsExisting(), so Aspire does not create a Gateway object for it. " +
+            "The following configuration applies to the Gateway itself and will be ignored: gateway class, TLS configuration, gateway annotations. " +
+            "Configure these on the platform-owned Gateway instead.",
+            warning.Message);
+    }
+
+    [Theory]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void WithRoute_WhitespaceRewritePrefix_Throws(string rewritePrefix)
+    {
+        // The Gateway API constrains replacePrefixMatch only by length, so shape validation here is
+        // deliberately minimal. A whitespace-only value is the one case with no defined meaning: it is
+        // always a typo, and unlike an empty string it cannot be read as "strip the matched prefix".
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        var k8s = builder.AddKubernetesEnvironment("env");
+        var api = builder.AddContainer("myapi", "nginx")
+            .WithHttpEndpoint(targetPort: 8080)
+            .WithExternalHttpEndpoints();
+
+        var gateway = k8s.AddGateway("gw").WithGatewayClass("nginx");
+
+        Assert.Throws<ArgumentException>(
+            () => gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: rewritePrefix));
+
+        Assert.Throws<ArgumentException>(
+            () => gateway.WithRoute("app.example.com", "/api", api.GetEndpoint("http"), rewritePrefix: rewritePrefix));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("api")]
+    public void WithRoute_RewritePrefixWithoutLeadingSlash_IsAccepted(string rewritePrefix)
+    {
+        // Two values Aspire previously rejected but the Gateway API permits. An empty string is
+        // explicitly defined as stripping the matched prefix ("/foo/bar" under "/foo" becomes "/bar"),
+        // and the spec imposes no leading-'/' requirement — only a 1024-character maximum.
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        var k8s = builder.AddKubernetesEnvironment("env");
+        var api = builder.AddContainer("myapi", "nginx")
+            .WithHttpEndpoint(targetPort: 8080)
+            .WithExternalHttpEndpoints();
+
+        var gateway = k8s.AddGateway("gw").WithGatewayClass("nginx");
+
+        gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: rewritePrefix);
+        gateway.WithRoute("app.example.com", "/api", api.GetEndpoint("http"), rewritePrefix: rewritePrefix);
+
+        Assert.Collection(
+            gateway.Resource.Routes,
+            route => Assert.Equal(rewritePrefix, route.RewritePrefix),
+            route => Assert.Equal(rewritePrefix, route.RewritePrefix));
+    }
+
+    [Theory]
+    [InlineData(GatewayPathMatchType.Exact)]
+    [InlineData(GatewayPathMatchType.RegularExpression)]
+    public void WithRoute_RewritePrefixWithNonPrefixMatch_Throws(GatewayPathMatchType pathType)
+    {
+        // ReplacePrefixMatch substitutes the portion of the path the match consumed. An Exact or
+        // RegularExpression match consumes no prefix, so the combination has no meaning.
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        var k8s = builder.AddKubernetesEnvironment("env");
+        var api = builder.AddContainer("myapi", "nginx")
+            .WithHttpEndpoint(targetPort: 8080)
+            .WithExternalHttpEndpoints();
+
+        var gateway = k8s.AddGateway("gw").WithGatewayClass("nginx");
+
+        Assert.Throws<ArgumentException>(
+            () => gateway.WithRoute("/api", api.GetEndpoint("http"), rewritePrefix: "/", pathType: pathType));
+
+        Assert.Throws<ArgumentException>(
+            () => gateway.WithRoute("app.example.com", "/api", api.GetEndpoint("http"), rewritePrefix: "/", pathType: pathType));
+    }
+
+    [Fact]
+    public void AsExisting_EmptyName_Throws()
+    {
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        var k8s = builder.AddKubernetesEnvironment("env");
+        var gateway = k8s.AddGateway("gw");
+
+        Assert.Throws<ArgumentException>(() => gateway.AsExisting(string.Empty));
+        // Whitespace is rejected for the same reason as empty: it names no Gateway. The C# overload and
+        // the polyglot union dispatcher must agree, and the dispatcher already rejects whitespace.
+        Assert.Throws<ArgumentException>(() => gateway.AsExisting("   "));
+        Assert.Throws<ArgumentException>(() => gateway.AsExisting("shared", @namespace: "   "));
+        Assert.Throws<ArgumentException>(() => gateway.AsExisting("shared", sectionName: "   "));
+    }
+
+    [Fact]
     public void WithRoute_InvalidPath_Throws()
     {
         var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);

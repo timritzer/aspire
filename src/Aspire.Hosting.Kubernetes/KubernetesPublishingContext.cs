@@ -125,13 +125,26 @@ internal sealed class KubernetesPublishingContext(
             }
         }
 
-        // Write Gateway API resources (Gateway + HTTPRoutes) as standalone templates.
+        // Write Gateway API resources (Gateway + HTTPRoutes) as standalone templates. A gateway
+        // attached to a pre-existing, platform-owned Gateway (AsExisting) emits no Gateway object
+        // of its own — GeneratedGateway is null — but still emits its HTTPRoutes, so the write is
+        // gated on there being any object to render rather than on GeneratedGateway specifically.
         foreach (var gatewayResource in resources.OfType<KubernetesGatewayResource>())
         {
-            if (gatewayResource.Parent == environment && gatewayResource.GeneratedGateway is { } generatedGateway)
+            if (gatewayResource.Parent != environment)
             {
-                var gatewayObjects = new List<BaseKubernetesResource> { generatedGateway };
-                gatewayObjects.AddRange(gatewayResource.GeneratedHttpRoutes);
+                continue;
+            }
+
+            var gatewayObjects = new List<BaseKubernetesResource>();
+            if (gatewayResource.GeneratedGateway is { } generatedGateway)
+            {
+                gatewayObjects.Add(generatedGateway);
+            }
+            gatewayObjects.AddRange(gatewayResource.GeneratedHttpRoutes);
+
+            if (gatewayObjects.Count > 0)
+            {
                 await WriteKubernetesTemplatesForResource(gatewayResource, gatewayObjects).ConfigureAwait(false);
             }
         }

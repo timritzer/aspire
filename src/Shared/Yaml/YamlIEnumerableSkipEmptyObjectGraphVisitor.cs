@@ -51,6 +51,13 @@ internal sealed class YamlIEnumerableSkipEmptyObjectGraphVisitor(
         {
             case null:
                 return false;
+            // `string` implements IEnumerable, so without this case an empty string would be treated as
+            // an empty collection and dropped. Empty strings can be meaningful data: the Gateway API
+            // gives `parentRef.group: ""` the distinct meaning "the core API group", and
+            // `replacePrefixMatch: ""` the meaning "strip the matched prefix".
+            case string:
+                retVal = base.EnterMapping(key, value, context, serializer);
+                break;
             case IEnumerable enumerableObject:
             {
                 var enumerator = enumerableObject.GetEnumerator();

@@ -51,6 +51,172 @@ public static class KubernetesGatewayExtensions
     }
 
     /// <summary>
+    /// Configures the gateway to attach its routes to a pre-existing, platform-owned Gateway rather
+    /// than generating a new <c>gateway.networking.k8s.io/v1 Gateway</c> object. Aspire emits only the
+    /// gateway's <c>HTTPRoute</c> resources, whose <c>parentRefs</c> target the named Gateway.
+    /// </summary>
+    /// <remarks>
+    /// This mirrors the <c>AsExisting</c> pattern used elsewhere in Aspire for referencing infrastructure
+    /// that lives outside the deployment. Because the referenced Gateway is owned by the platform, every
+    /// builder call that shapes the <c>Gateway</c> object itself is ignored — its listeners, TLS,
+    /// <c>gatewayClassName</c>, annotations, and <c>allowedRoutes</c> are all managed externally. That
+    /// covers <see cref="WithGatewayClass(IResourceBuilder{KubernetesGatewayResource}, string)"/>,
+    /// <see cref="WithTls(IResourceBuilder{KubernetesGatewayResource}, string)"/>,
+    /// <see cref="WithGatewayAnnotation(IResourceBuilder{KubernetesGatewayResource}, string, string)"/>,
+    /// cert-manager's <c>WithTls(issuer)</c> cluster-issuer wiring, and provider-specific load-balancer
+    /// configuration such as Azure Application Gateway for Containers. A warning is emitted during
+    /// publishing when any of them is combined with this method. Route-level configuration continues to
+    /// apply, because it shapes the <c>HTTPRoute</c> rather than the Gateway: see
+    /// <see cref="WithHostname(IResourceBuilder{KubernetesGatewayResource}, string)"/> and <c>WithRoute</c>.
+    /// Supplying a <paramref name="namespace"/> lets a route attach to a Gateway in a different namespace,
+    /// and a <paramref name="sectionName"/> targets a specific listener. See the Gateway API documentation:
+    /// <see href="https://gateway-api.sigs.k8s.io/api-types/httproute/#attaching-to-gateways"/>.
+    /// </remarks>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="name">The <c>metadata.name</c> of the existing Gateway object.</param>
+    /// <param name="namespace">The namespace of the existing Gateway. When <see langword="null"/> the reference resolves within the deployment's namespace.</param>
+    /// <param name="sectionName">The listener (section) name on the existing Gateway to attach to. When <see langword="null"/> routes attach to every compatible listener.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExportIgnore(Reason = "Polyglot AppHosts use the union-based asExisting dispatcher export.")]
+    public static IResourceBuilder<KubernetesGatewayResource> AsExisting(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        string name,
+        string? @namespace = null,
+        string? sectionName = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        // Unlike `group`, where the Gateway API gives the empty string the distinct meaning "core API
+        // group", an empty or whitespace name/namespace/sectionName has no meaning and would emit a
+        // parentRef that resolves to nothing. Reject it here rather than emitting an unusable route.
+        if (@namespace is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(@namespace);
+        }
+
+        if (sectionName is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(sectionName);
+        }
+
+        return AsExistingCore(
+            builder,
+            ReferenceExpression.Create($"{name}"),
+            @namespace is null ? null : ReferenceExpression.Create($"{@namespace}"),
+            sectionName is null ? null : ReferenceExpression.Create($"{sectionName}"));
+    }
+
+    /// <summary>
+    /// Configures the gateway to attach its routes to a pre-existing, platform-owned Gateway identified
+    /// by parameters that are resolved at deploy time.
+    /// </summary>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="name">A parameter resource builder for the <c>metadata.name</c> of the existing Gateway object.</param>
+    /// <param name="namespace">A parameter resource builder for the namespace of the existing Gateway, or <see langword="null"/> to resolve within the deployment's namespace.</param>
+    /// <param name="sectionName">A parameter resource builder for the listener (section) name, or <see langword="null"/> to attach to every compatible listener.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExportIgnore(Reason = "Polyglot AppHosts use the union-based asExisting dispatcher export.")]
+    public static IResourceBuilder<KubernetesGatewayResource> AsExisting(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        IResourceBuilder<ParameterResource> name,
+        IResourceBuilder<ParameterResource>? @namespace = null,
+        IResourceBuilder<ParameterResource>? sectionName = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(name);
+
+        return AsExistingCore(
+            builder,
+            ReferenceExpression.Create($"{name.Resource}"),
+            @namespace is null ? null : ReferenceExpression.Create($"{@namespace.Resource}"),
+            sectionName is null ? null : ReferenceExpression.Create($"{sectionName.Resource}"));
+    }
+
+    /// <summary>
+    /// Configures the gateway to attach its routes to a pre-existing, platform-owned Gateway.
+    /// </summary>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="name">The <c>metadata.name</c> of the existing Gateway as a string or parameter resource builder.</param>
+    /// <param name="namespace">The namespace of the existing Gateway as a string or parameter resource builder.</param>
+    /// <param name="sectionName">The listener (section) name as a string or parameter resource builder.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport(MethodName = "asExisting")]
+    internal static IResourceBuilder<KubernetesGatewayResource> AsExisting(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        [AspireUnion(typeof(string), typeof(IResourceBuilder<ParameterResource>))] object name,
+        [AspireUnion(typeof(string), typeof(IResourceBuilder<ParameterResource>))] object? @namespace = null,
+        [AspireUnion(typeof(string), typeof(IResourceBuilder<ParameterResource>))] object? sectionName = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(name);
+
+        return AsExistingCore(
+            builder,
+            ToGatewayReference(name, nameof(name))!,
+            ToGatewayReference(@namespace, nameof(@namespace)),
+            ToGatewayReference(sectionName, nameof(sectionName)));
+    }
+
+    private static void ValidateRewritePrefix(string? rewritePrefix, GatewayPathMatchType pathType, string paramName)
+    {
+        if (rewritePrefix is null)
+        {
+            return;
+        }
+
+        // An empty rewritePrefix is deliberately allowed: the Gateway API defines it as stripping the
+        // matched prefix, so "/foo/bar" under a "/foo" prefix match rewrites to "/bar". The only
+        // constraint the spec places on the value itself is a 1024-character maximum, so no leading-'/'
+        // requirement is imposed here. A whitespace-only value has no such defined meaning and is always
+        // a mistake, so it is still rejected.
+        if (rewritePrefix.Length > 0 && string.IsNullOrWhiteSpace(rewritePrefix))
+        {
+            throw new ArgumentException(
+                "Rewrite prefix must not be whitespace. Use an empty string to strip the matched prefix.",
+                paramName);
+        }
+
+        // ReplacePrefixMatch substitutes the portion of the path that the match consumed, so there has to
+        // be a matched prefix to replace. With an Exact or RegularExpression match there is none. The
+        // Gateway API enforces the same constraint with a CEL rule on HTTPRouteRule: "When using
+        // URLRewrite filter with path.replacePrefixMatch, exactly one PathPrefix match must be specified".
+        if (pathType != GatewayPathMatchType.PathPrefix)
+        {
+            throw new ArgumentException(
+                $"Rewrite prefix requires a {nameof(GatewayPathMatchType.PathPrefix)} path match; " +
+                $"'{pathType}' does not match a prefix that can be replaced.",
+                paramName);
+        }
+    }
+
+    private static ReferenceExpression? ToGatewayReference(object? value, string paramName) => value switch
+    {
+        null => null,
+        string text => string.IsNullOrWhiteSpace(text)
+            ? throw new ArgumentException("Value must not be empty or whitespace.", paramName)
+            : ReferenceExpression.Create($"{text}"),
+        IResourceBuilder<ParameterResource> parameter => ReferenceExpression.Create($"{parameter.Resource}"),
+        _ => throw new ArgumentException("Value must be a string or a parameter resource builder.", paramName)
+    };
+
+    private static IResourceBuilder<KubernetesGatewayResource> AsExistingCore(
+        IResourceBuilder<KubernetesGatewayResource> builder,
+        ReferenceExpression name,
+        ReferenceExpression? @namespace,
+        ReferenceExpression? sectionName)
+    {
+        // Replace rather than append so repeated calls are idempotent and the last one wins, matching
+        // how the other single-valued Kubernetes annotations in this package are applied.
+        return builder.WithAnnotation(
+            new ExistingKubernetesGatewayAnnotation(name, @namespace, sectionName),
+            ResourceAnnotationMutationBehavior.Replace);
+    }
+
+    /// <summary>
     /// Sets the GatewayClass name that selects which controller implementation handles this gateway.
     /// </summary>
     /// <param name="builder">The gateway resource builder.</param>
@@ -108,21 +274,45 @@ public static class KubernetesGatewayExtensions
         GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ArgumentException.ThrowIfNullOrEmpty(path);
-        ArgumentNullException.ThrowIfNull(endpoint);
 
-        if (!path.StartsWith('/'))
-        {
-            throw new ArgumentException("Path must start with '/'.", nameof(path));
-        }
+        return AddRouteCore(builder, host: null, path, endpoint, pathType, rewritePrefix: null);
+    }
 
-        builder.Resource.Routes.Add(new GatewayRouteConfig(
-            Host: null,
-            Path: path,
-            PathType: pathType,
-            Endpoint: endpoint));
+    /// <summary>
+    /// Adds a path-based routing rule that rewrites the matched path prefix before the request reaches
+    /// the backend, so a service mounted under a path prefix on a shared gateway can keep serving its
+    /// own paths unchanged.
+    /// </summary>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="path">The URL path to match (e.g., <c>"/"</c> or <c>"/api"</c>). Must start with <c>/</c>.</param>
+    /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
+    /// <param name="rewritePrefix">
+    /// The value that replaces the matched path prefix. Use <c>"/"</c> to present the backend with a
+    /// root-relative path, or an empty string to strip the matched prefix entirely.
+    /// </param>
+    /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    /// <remarks>
+    /// Emitted as a Gateway API <c>URLRewrite</c> filter with a <c>ReplacePrefixMatch</c> path modifier.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// gateway.WithRoute("/my-app", api.GetEndpoint("http"), rewritePrefix: "/");
+    /// </code>
+    /// </example>
+    [AspireExport("withGatewayPathRouteRewrite")]
+    public static IResourceBuilder<KubernetesGatewayResource> WithRoute(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        string path,
+        EndpointReference endpoint,
+        string rewritePrefix,
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(rewritePrefix);
 
-        return builder;
+        return AddRouteCore(builder, host: null, path, endpoint, pathType, rewritePrefix);
     }
 
     /// <summary>
@@ -147,6 +337,57 @@ public static class KubernetesGatewayExtensions
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrEmpty(host);
+
+        return AddRouteCore(builder, host, path, endpoint, pathType, rewritePrefix: null);
+    }
+
+    /// <summary>
+    /// Adds a host-and-path-based routing rule that rewrites the matched path prefix before the request
+    /// reaches the backend.
+    /// </summary>
+    /// <param name="builder">The gateway resource builder.</param>
+    /// <param name="host">The hostname to match (e.g., <c>"api.example.com"</c>).</param>
+    /// <param name="path">The URL path to match. Must start with <c>/</c>.</param>
+    /// <param name="endpoint">The endpoint reference identifying the target service and port.</param>
+    /// <param name="rewritePrefix">
+    /// The value that replaces the matched path prefix. Use <c>"/"</c> to present the backend with a
+    /// root-relative path, or an empty string to strip the matched prefix entirely.
+    /// </param>
+    /// <param name="pathType">The path matching strategy. Defaults to <see cref="GatewayPathMatchType.PathPrefix"/>.</param>
+    /// <returns>A reference to the <see cref="IResourceBuilder{KubernetesGatewayResource}"/> for chaining.</returns>
+    /// <ats-returns>The resource builder.</ats-returns>
+    /// <remarks>
+    /// Emitted as a Gateway API <c>URLRewrite</c> filter with a <c>ReplacePrefixMatch</c> path modifier.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// gateway.WithRoute("api.example.com", "/my-app", api.GetEndpoint("http"), rewritePrefix: "/");
+    /// </code>
+    /// </example>
+    [AspireExport("withGatewayHostRouteRewrite")]
+    public static IResourceBuilder<KubernetesGatewayResource> WithRoute(
+        this IResourceBuilder<KubernetesGatewayResource> builder,
+        string host,
+        string path,
+        EndpointReference endpoint,
+        string rewritePrefix,
+        GatewayPathMatchType pathType = GatewayPathMatchType.PathPrefix)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrEmpty(host);
+        ArgumentNullException.ThrowIfNull(rewritePrefix);
+
+        return AddRouteCore(builder, host, path, endpoint, pathType, rewritePrefix);
+    }
+
+    private static IResourceBuilder<KubernetesGatewayResource> AddRouteCore(
+        IResourceBuilder<KubernetesGatewayResource> builder,
+        string? host,
+        string path,
+        EndpointReference endpoint,
+        GatewayPathMatchType pathType,
+        string? rewritePrefix)
+    {
         ArgumentException.ThrowIfNullOrEmpty(path);
         ArgumentNullException.ThrowIfNull(endpoint);
 
@@ -155,11 +396,14 @@ public static class KubernetesGatewayExtensions
             throw new ArgumentException("Path must start with '/'.", nameof(path));
         }
 
+        ValidateRewritePrefix(rewritePrefix, pathType, nameof(rewritePrefix));
+
         builder.Resource.Routes.Add(new GatewayRouteConfig(
             Host: host,
             Path: path,
             PathType: pathType,
-            Endpoint: endpoint));
+            Endpoint: endpoint,
+            RewritePrefix: rewritePrefix));
 
         return builder;
     }
