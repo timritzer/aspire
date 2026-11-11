@@ -593,7 +593,7 @@ public class CertManagerTests
         var k8s = builder.AddKubernetesEnvironment("env");
         var issuer = k8s.AddCertManager("cert-manager")
             .AddIssuer("le-prod")
-            .WithLetsEncryptProduction("ops@contoso.com")
+            .WithAcmeServer("https://acme-v02.api.letsencrypt.org/directory", "ops@contoso.com")
             .WithHttp01Solver();
 
         var api = builder.AddContainer("myapi", "nginx")

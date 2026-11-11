@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Aspire.Hosting.Yaml;
 using YamlDotNet.Serialization;
 
 namespace Aspire.Hosting.Kubernetes.Resources;
@@ -86,9 +87,11 @@ public sealed class HttpRouteParentRefV1
     /// </summary>
     /// <remarks>
     /// When <see langword="null"/> the Gateway API core group (<c>gateway.networking.k8s.io</c>) is
-    /// assumed. Set this only when attaching to a parent defined by a different API group.
+    /// assumed. Set this only when attaching to a parent defined by a different API group. An empty
+    /// string denotes the Kubernetes core API group and is emitted as-is.
     /// </remarks>
     [YamlMember(Alias = "group")]
+    [PreserveEmptyString]
     public string? Group { get; set; }
 
     /// <summary>
@@ -295,15 +298,19 @@ public sealed class HttpPathModifierV1
 
     /// <summary>
     /// Gets or sets the value that replaces the matched path prefix. Populated only when
-    /// <see cref="Type"/> is <c>ReplacePrefixMatch</c>.
+    /// <see cref="Type"/> is <c>ReplacePrefixMatch</c>. An empty string strips the matched prefix and
+    /// is emitted as-is.
     /// </summary>
     [YamlMember(Alias = "replacePrefixMatch")]
+    [PreserveEmptyString]
     public string? ReplacePrefixMatch { get; set; }
 
     /// <summary>
     /// Gets or sets the value that replaces the entire path. Populated only when <see cref="Type"/>
-    /// is <c>ReplaceFullPath</c>.
+    /// is <c>ReplaceFullPath</c>. An empty string is emitted as-is, because the Gateway API requires
+    /// this field to be present whenever <see cref="Type"/> is <c>ReplaceFullPath</c>.
     /// </summary>
     [YamlMember(Alias = "replaceFullPath")]
+    [PreserveEmptyString]
     public string? ReplaceFullPath { get; set; }
 }
